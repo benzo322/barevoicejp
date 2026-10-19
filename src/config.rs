@@ -1,0 +1,428 @@
+//! 起動設定と CLI。
+//!
+//! `voice_input.py` の `CONFIG` と `build_arg_parser` / `apply_cli_overrides` を
+//! そのまま Rust へ移植したもの。
+
+use std::path::PathBuf;
+
+// モデルディレクトリ名。`models/` 配下の展開先と一致させる。
+const SENSEVOICE_DIR_NAME: &str = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17";
+const REAZONSPEECH_DIR_NAME: &str = "sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01";
+
+// ---------------------------------------------------------------------------
+// 内部チューニング定数
+//
+// ユーザーが CLI / `Config` から変更する値は `Config` に置き、ここには
+// 実装上の固定値 (モデル仕様・無音判定・再試行回数など) を集約する。
+// ---------------------------------------------------------------------------
+/// 推論モデルが要求する特徴量次元。
+pub const FEATURE_DIM: i32 = 80;
+/// greedy/beam 探索で保持するパス数。
+pub const MAX_ACTIVE_PATHS: i32 = 4;
+/// これ未満のピーク振幅は無音とみなす。
+pub const SILENCE_PEAK_THRESHOLD: f32 = 1e-4;
+/// ハイパスフィルタのカットオフ周波数 (Hz)。
+pub const HIGHPASS_CUTOFF_HZ: f64 = 80.0;
+/// tail サンプルの到着を待つ上限 (ms)。
+pub const WORKER_WAIT_TIMEOUT_MS: u64 = 2_000;
+/// tail 待ちのポーリング間隔 (ms)。
+pub const WORKER_POLL_INTERVAL_MS: u64 = 5;
+/// クリップボードを開く際の再試行回数。
+pub const CLIPBOARD_OPEN_ATTEMPTS: u32 = 10;
+/// クリップボード再試行の間隔 (ms)。
+pub const CLIPBOARD_OPEN_RETRY_MS: u64 = 10;
+/// cpal のストリームエラーコールバック待ちタイムアウト (ms)。
+pub const AUDIO_STREAM_TIMEOUT_MS: u64 = 1_000;
+/// 音声コールバックの一時バッファ初期容量 (サンプル数)。
+pub const AUDIO_SCRATCH_SAMPLES: usize = 8_192;
+/// ファジーマッチ対象にする読み・正式表記の最小文字数。
+pub const FUZZY_MIN_CHARS: usize = 4;
+/// 読みが長い単語でしきい値を緩和する文字数。
+pub const FUZZY_LENIENT_MIN_CHARS: usize = 6;
+/// 読みが長い単語の緩和しきい値 (%)。
+pub const FUZZY_LENIENT_THRESHOLD: f64 = 75.0;
+/// ファジー照合で許容する読みとの長さ差 (文字)。
+pub const FUZZY_LENGTH_SLACK: usize = 2;
+/// リングバッファ長の下限 (秒)。
+pub const MIN_RING_SECONDS: f32 = 1.0;
+/// ミリ秒と秒の換算。
+pub const MS_PER_SECOND: u64 = 1_000;
+/// 浮動小数で扱うミリ秒換算。
+pub const MS_PER_SECOND_F64: f64 = MS_PER_SECOND as f64;
+
+/// 既定のモデルディレクトリを探す。
+///
+/// リファレンスはスクリプトと同じディレクトリの `models/` を使う。
+/// Rust 版はビルド時のマニフェスト位置 → exe の隣 → カレントディレクトリの順に
+/// 実在するものを採用する。
+fn default_model_dir(name: &str) -> PathBuf {
+    let mut candidates: Vec<PathBuf> = Vec::with_capacity(3);
+    if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
+        candidates.push(PathBuf::from(manifest).join("models").join(name));
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join("models").join(name));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("models").join(name));
+    }
+    candidates
+        .iter()
+        .find(|path| path.exists())
+        .cloned()
+        .or_else(|| candidates.into_iter().next())
+        .unwrap_or_else(|| PathBuf::from("models").join(name))
+}
+
+/// 実行時の全設定。
+///
+/// 既定値は `Default` に集約している。CLI で指定された項目だけを
+/// [`Config::apply_cli`] が上書きする。キー割り当て・録音長・しきい値などを
+/// 変える場合はまずこの構造体を編集する。
+#[derive(Clone, Debug)]
+pub struct Config {
+    // --- モデル ---
+    pub model: String,
+    pub model_dir_override: Option<PathBuf>,
+    pub sensevoice_model_dir: PathBuf,
+    pub reazonspeech_model_dir: PathBuf,
+    pub num_threads: i32,
+    pub provider: String,
+    pub language: String,
+    pub use_itn: bool,
+    pub hotwords_score: f32,
+
+    // --- 録音 / ホットキー ---
+    /// 押している間だけ録音するキー名 (`alt_r`, `f9`, `ctrl_r` など)。
+    pub hotkey: String,
+    pub paste_modifier: String,
+    pub paste_key: String,
+    pub sample_rate: u32,
+    pub block_size: u32,
+    /// 押下直前の音声を巻き戻して含める長さ (ms)。
+    pub pre_roll_ms: u32,
+    /// 離した直後の取りこぼしを防ぐため、余分に取得する長さ (ms)。
+    pub tail_grace_ms: u32,
+    /// これ未満の押下は破棄する (ms)。
+    pub min_duration_ms: u32,
+    /// 離下直後の再押下・キーリピートを無視する時間 (ms)。
+    pub repeat_guard_ms: u32,
+    pub ring_seconds: f32,
+    pub device: Option<String>,
+
+    // --- 音響前処理 ---
+    pub highpass: bool,
+    pub denoise: bool,
+
+    // --- 貼り付け / クリップボード ---
+    /// クリップボード設定後、Ctrl+V を送るまでの待機 (ms)。
+    pub paste_delay_ms: u32,
+    pub restore_clipboard: bool,
+    pub clipboard_restore_delay_ms: u32,
+
+    // --- テキスト整形 ---
+    pub remove_tags: bool,
+    pub remove_ja_spaces: bool,
+    /// words.txt のファジーマッチしきい値 (%)。
+    pub fuzzy_threshold: f64,
+    /// 組み込みの完全一致置換 (replacements.json が優先)。
+    pub replacements: Vec<(String, String)>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            model: "sensevoice".to_string(),
+            model_dir_override: None,
+            sensevoice_model_dir: default_model_dir(SENSEVOICE_DIR_NAME),
+            reazonspeech_model_dir: default_model_dir(REAZONSPEECH_DIR_NAME),
+            num_threads: 2,
+            provider: "cpu".to_string(),
+            language: "auto".to_string(),
+            use_itn: true,
+            hotwords_score: 2.0,
+
+            hotkey: "alt_r".to_string(),
+            paste_modifier: "ctrl".to_string(),
+            paste_key: "v".to_string(),
+            sample_rate: 16_000,
+            block_size: 256,
+            pre_roll_ms: 200,
+            tail_grace_ms: 80,
+            min_duration_ms: 200,
+            repeat_guard_ms: 250,
+            ring_seconds: 60.0,
+            device: None,
+
+            highpass: false,
+            denoise: false,
+
+            paste_delay_ms: 50,
+            restore_clipboard: false,
+            clipboard_restore_delay_ms: 300,
+
+            remove_tags: true,
+            remove_ja_spaces: true,
+            fuzzy_threshold: 80.0,
+            replacements: default_replacements(),
+        }
+    }
+}
+
+/// Python の dict リテラルと同じ順序を保つ。
+fn default_replacements() -> Vec<(String, String)> {
+    [
+        ("えーぴーあい", "API"),
+        ("えーぴーアイ", "API"),
+        ("エーピーアイ", "API"),
+        ("えーあい", "AI"),
+        ("エーアイ", "AI"),
+        ("じーぴーてぃー", "GPT"),
+        ("ジーピーティー", "GPT"),
+        ("えるえるえむ", "LLM"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_string(), value.to_string()))
+    .collect()
+}
+
+impl Config {
+    /// hotwords.txt が存在する場合のみ推論エンジンへ渡す。
+    pub fn hotwords_file(&self) -> Option<PathBuf> {
+        let path = PathBuf::from(crate::text::HOTWORDS_PATH);
+        path.is_file().then_some(path)
+    }
+
+    /// 選択中のモデルに対応するディレクトリを返す。
+    /// `--model-dir` が指定されていればそれを優先する。
+    pub fn model_dir_for(&self, model: &str) -> PathBuf {
+        if let Some(dir) = &self.model_dir_override {
+            return dir.clone();
+        }
+        match model {
+            "reazonspeech" => self.reazonspeech_model_dir.clone(),
+            _ => self.sensevoice_model_dir.clone(),
+        }
+    }
+}
+
+/// CLI の生の上書き値。
+///
+/// 値が `None` の項目は [`Config::default`] の値を維持する。
+#[derive(Debug, Default)]
+pub struct Cli {
+    model: Option<String>,
+    model_dir: Option<PathBuf>,
+    hotkey: Option<String>,
+    paste_modifier: Option<String>,
+    device: Option<String>,
+    language: Option<String>,
+    num_threads: Option<i32>,
+    provider: Option<String>,
+    hotwords_score: Option<f32>,
+    highpass: Option<bool>,
+    denoise: Option<bool>,
+    pre_roll_ms: Option<u32>,
+    min_duration_ms: Option<u32>,
+    paste_delay_ms: Option<u32>,
+    restore_clipboard: Option<bool>,
+    itn: Option<bool>,
+    /// 入力デバイス一覧を表示して終了する。
+    pub list_devices: bool,
+    /// デバッグログを有効にする。
+    pub debug: bool,
+    /// ヘルプを表示して終了する。
+    pub help: bool,
+}
+
+/// CLI ヘルプ。`--help` でそのまま表示する。
+pub const HELP: &str = "\
+使い方: mkvoicejp [オプション]
+
+SenseVoice / ReazonSpeech を使う Push-to-Talk 音声入力 (Windows)
+
+オプション:
+  -h, --help                 このヘルプを表示して終了
+  --model {sensevoice,reazonspeech}
+                             推論モデル (既定: sensevoice)
+  --model-dir DIR            選択したモデルのディレクトリ
+  --hotkey KEY               押している間だけ録音するキー (既定: alt_r)
+  --paste-modifier MOD       貼り付けの修飾キー (既定: ctrl)
+  --device SPEC              入力デバイス番号または名前の一部
+  --language LANG            SenseVoice の認識言語 (auto/ja/en/zh/ko/yue)
+  --num-threads N            CPU 推論スレッド数 (既定: 2)
+  --provider NAME            ONNX Runtime provider (既定: cpu)
+  --hotwords-score F         ホットワードスコア (既定: 2.0)
+  --highpass / --no-highpass 80Hz ハイパスフィルタ (既定: OFF)
+  --denoise / --no-denoise   RNNoise ノイズリダクション (既定: OFF)
+  --pre-roll-ms MS           押下直前の音声を含める長さ (既定: 200)
+  --min-duration-ms MS       これ未満の押下は破棄 (既定: 200)
+  --paste-delay-ms MS        クリップボード設定から貼り付けまでの待機 (既定: 50)
+  --restore-clipboard / --no-restore-clipboard
+                             貼り付け後に元のクリップボードを復元 (既定: OFF)
+  --itn / --no-itn           SenseVoice の逆テキスト正規化 (既定: ON)
+  --list-devices             入力デバイス一覧を表示して終了
+  --debug                    デバッグログを表示
+";
+
+/// コマンドライン引数 (プログラム名を除く) を解析する。
+///
+/// 値の検証と `--no-*` の解釈だけを行い、`Config` への反映は
+/// [`Config::apply_cli`] が担当する。
+pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
+    let mut cli = Cli::default();
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
+        let (name, inline_value) = match arg.split_once('=') {
+            Some((name, value)) => (name.to_string(), Some(value.to_string())),
+            None => (arg.clone(), None),
+        };
+        let mut take_value = |name: &str| -> Result<String, String> {
+            if let Some(value) = inline_value.clone() {
+                return Ok(value);
+            }
+            iter.next()
+                .ok_or_else(|| format!("引数 {name} には値が必要です"))
+        };
+        match name.as_str() {
+            "-h" | "--help" => cli.help = true,
+            "--model" => {
+                let value = take_value("--model")?;
+                if value != "sensevoice" && value != "reazonspeech" {
+                    return Err(format!(
+                        "--model は sensevoice / reazonspeech のいずれかです: {value}"
+                    ));
+                }
+                cli.model = Some(value);
+            }
+            "--model-dir" => cli.model_dir = Some(PathBuf::from(take_value("--model-dir")?)),
+            "--hotkey" => cli.hotkey = Some(take_value("--hotkey")?),
+            "--paste-modifier" => {
+                cli.paste_modifier = Some(take_value("--paste-modifier")?);
+            }
+            "--device" => cli.device = Some(take_value("--device")?),
+            "--language" => {
+                let value = take_value("--language")?;
+                const LANGS: [&str; 6] = ["auto", "ja", "en", "zh", "ko", "yue"];
+                if !LANGS.contains(&value.as_str()) {
+                    return Err(format!(
+                        "--language は auto/ja/en/zh/ko/yue のいずれかです: {value}"
+                    ));
+                }
+                cli.language = Some(value);
+            }
+            "--num-threads" => {
+                let value = take_value("--num-threads")?;
+                cli.num_threads = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("--num-threads が数値ではありません: {value}"))?,
+                );
+            }
+            "--provider" => cli.provider = Some(take_value("--provider")?),
+            "--hotwords-score" => {
+                let value = take_value("--hotwords-score")?;
+                cli.hotwords_score = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("--hotwords-score が数値ではありません: {value}"))?,
+                );
+            }
+            "--highpass" => cli.highpass = Some(true),
+            "--no-highpass" => cli.highpass = Some(false),
+            "--denoise" => cli.denoise = Some(true),
+            "--no-denoise" => cli.denoise = Some(false),
+            "--pre-roll-ms" => {
+                let value = take_value("--pre-roll-ms")?;
+                cli.pre_roll_ms = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("--pre-roll-ms が数値ではありません: {value}"))?,
+                );
+            }
+            "--min-duration-ms" => {
+                let value = take_value("--min-duration-ms")?;
+                cli.min_duration_ms = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("--min-duration-ms が数値ではありません: {value}"))?,
+                );
+            }
+            "--paste-delay-ms" => {
+                let value = take_value("--paste-delay-ms")?;
+                cli.paste_delay_ms = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("--paste-delay-ms が数値ではありません: {value}"))?,
+                );
+            }
+            "--restore-clipboard" => cli.restore_clipboard = Some(true),
+            "--no-restore-clipboard" => cli.restore_clipboard = Some(false),
+            "--itn" => cli.itn = Some(true),
+            "--no-itn" => cli.itn = Some(false),
+            "--list-devices" => cli.list_devices = true,
+            "--debug" => cli.debug = true,
+            other => {
+                if other.starts_with('-') {
+                    return Err(format!("不明なオプションです: {other}\n\n{HELP}"));
+                }
+                return Err(format!("位置引数は受け付けません: {other}"));
+            }
+        }
+    }
+    Ok(cli)
+}
+
+impl Config {
+    /// CLI で明示された項目だけを `Config` に反映する。
+    pub fn apply_cli(&mut self, cli: &Cli) {
+        if let Some(value) = &cli.model {
+            self.model = value.clone();
+        }
+        if let Some(value) = &cli.hotkey {
+            self.hotkey = value.clone();
+        }
+        if let Some(value) = &cli.paste_modifier {
+            self.paste_modifier = value.clone();
+        }
+        if let Some(value) = &cli.device {
+            self.device = Some(value.clone());
+        }
+        if let Some(value) = &cli.language {
+            self.language = value.clone();
+        }
+        if let Some(value) = cli.num_threads {
+            self.num_threads = value;
+        }
+        if let Some(value) = &cli.provider {
+            self.provider = value.clone();
+        }
+        if let Some(value) = cli.hotwords_score {
+            self.hotwords_score = value;
+        }
+        if let Some(value) = cli.highpass {
+            self.highpass = value;
+        }
+        if let Some(value) = cli.denoise {
+            self.denoise = value;
+        }
+        if let Some(value) = cli.pre_roll_ms {
+            self.pre_roll_ms = value;
+        }
+        if let Some(value) = cli.min_duration_ms {
+            self.min_duration_ms = value;
+        }
+        if let Some(value) = cli.paste_delay_ms {
+            self.paste_delay_ms = value;
+        }
+        if let Some(value) = cli.restore_clipboard {
+            self.restore_clipboard = value;
+        }
+        if let Some(value) = cli.itn {
+            self.use_itn = value;
+        }
+        self.model_dir_override = cli.model_dir.clone();
+    }
+}

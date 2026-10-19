@@ -1,0 +1,19 @@
+# Python関連
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# ダウンロードしたモデル・アーカイブ（Gitに含めない）
+*.onnx
+*.tar.bz2
+sherpa-onnx-*/
+
+# Rust ビルド成果物
+/target/
+
+# OS一時ファイル
+.DS_Store
+Thumbs.db
