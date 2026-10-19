@@ -34,12 +34,14 @@ Ctrl+V (macOS は Cmd+V) で貼り付ける、完全ローカルのプロトタ�
     python3 voice_input.py --model reazonspeech     # ReazonSpeech
     python3 voice_input.py --highpass               # HPF を有効化
     python3 voice_input.py --denoise                # RNNoise を有効化
+    python3 voice_input.py --hotwords-score 2.0
     python3 voice_input.py --list-devices
     python3 voice_input.py --hotkey f9 --device 2
 
     既定では録音バッファをそのまま推論へ渡す (前処理なし)。
-    カレントディレクトリの replacements.json を自動で読み込む
-    (存在しない場合は空のテンプレートを生成)。
+    カレントディレクトリの replacements.json と hotwords.txt を自動で
+    読み込む (存在しない場合はテンプレートを生成)。録音開始時に mtime を
+    確認し、変更があれば自動で再読み込みする (ホットリロード)。
     既定の録音キーは右 Alt (macOS は右 Option)。
     押している間だけ録音。離すと推論して貼り付け。
     録音中に Esc を押すとキャンセル。0.2 秒未満の押下も破棄。
@@ -56,6 +58,8 @@ Ctrl+V (macOS は Cmd+V) で貼り付ける、完全ローカルのプロトタ�
       のみの退避なので、元が画像やリッチテキストの場合は失われる。
     - 推論と貼り付けは 1 本のワーカースレッドで直列化している
       (asyncio 等は不使用)。Rust 移植時は各クラスをそのまま構造体へ対応させる。
+    - SenseVoice の hotwords は sherpa-onnx の対応バージョンが必要。
+      未対応の場合は警告を出し、ホットワードなしで起動する。
 """
 
 from __future__ import annotations
@@ -74,12 +78,16 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 logger = logging.getLogger("voice_input")
+
+REPLACEMENTS_PATH = Path("replacements.json")
+HOTWORDS_PATH = Path("hotwords.txt")
+HOTWORDS_TEMPLATE = "GitHub Actions\nDocker\nAPI\n"
 
 # ---------------------------------------------------------------------------
 # ここを 1 行ずつ変えれば主要な挙動を調整できる。
@@ -97,6 +105,7 @@ CONFIG: dict[str, Any] = {
     "provider": "cpu",          # cpu / cuda / coreml など
     "language": "auto",         # SenseVoice のみ: auto / ja / en / zh / ko / yue
     "use_itn": True,            # SenseVoice のみ: 逆テキスト正規化
+    "hotwords_score": 2.0,      # SenseVoice のホットワードスコア
 
     # --- 録音 / ホットキー (None = OS ごとの既定値) ---
     "hotkey": "alt_r",          # 右Alt (= Key.alt_r)。None なら OS 既定
@@ -253,6 +262,7 @@ class OfflineAsrEngine:
     def __init__(self, recognizer: Any, sample_rate: int) -> None:
         self._recognizer = recognizer
         self.sample_rate = sample_rate
+        self.hotwords_supported = False
 
     def transcribe(self, samples: np.ndarray) -> str:
         """16kHz / mono / float32 の波形を文字起こしする。"""
@@ -273,22 +283,57 @@ class SenseVoiceEngine(OfflineAsrEngine):
         provider: str,
         language: str,
         use_itn: bool,
+        hotwords_file: str | Path | None = None,
+        hotwords_score: float = 2.0,
     ) -> None:
         model, tokens = resolve_sensevoice_files(model_dir)
         sherpa_onnx = load_sherpa_onnx()
 
+        base_kwargs = dict(
+            model=str(model),
+            tokens=str(tokens),
+            num_threads=num_threads,
+            sample_rate=sample_rate,
+            provider=provider,
+            language=language,
+            use_itn=use_itn,
+            debug=False,
+        )
+        hotwords_supported = False
         logger.info("SenseVoice モデル読み込み: %s", model)
         try:
-            recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
-                model=str(model),
-                tokens=str(tokens),
-                num_threads=num_threads,
-                sample_rate=sample_rate,
-                provider=provider,
-                language=language,
-                use_itn=use_itn,
-                debug=False,
-            )
+            if hotwords_file is not None:
+                try:
+                    recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                        **base_kwargs,
+                        hotwords_file=str(hotwords_file),
+                        hotwords_score=hotwords_score,
+                    )
+                    hotwords_supported = True
+                except TypeError as exc:
+                    # この sherpa-onnx の SenseVoice API が hotwords 非対応の場合。
+                    logger.warning(
+                        "この sherpa-onnx (%s) は SenseVoice の hotwords_file に"
+                        "未対応です。ホットワードなしで初期化します: %s",
+                        getattr(sherpa_onnx, "__version__", "?"),
+                        exc,
+                    )
+                    recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                        **base_kwargs
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "ホットワードの読み込みに失敗しました。"
+                        "ホットワードなしで初期化します: %s",
+                        exc,
+                    )
+                    recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                        **base_kwargs
+                    )
+            else:
+                recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+                    **base_kwargs
+                )
         except Exception as exc:
             raise VoiceInputError(
                 f"SenseVoice モデルの初期化に失敗しました: {model}\n"
@@ -296,6 +341,7 @@ class SenseVoiceEngine(OfflineAsrEngine):
                 f"  詳細: {exc}"
             ) from exc
         super().__init__(recognizer, sample_rate)
+        self.hotwords_supported = hotwords_supported
         logger.info(
             "モデル準備完了 (SenseVoice / ITN=%s, language=%s, threads=%d, provider=%s)",
             "on" if use_itn else "off",
@@ -354,6 +400,7 @@ def build_engine(
     sample_rate = int(config["sample_rate"])
     num_threads = int(config["num_threads"])
     provider = str(config["provider"])
+    hotwords_file = HOTWORDS_PATH if HOTWORDS_PATH.is_file() else None
 
     if model_type == "sensevoice":
         selected_dir = model_dir if model_dir is not None else config["model_dir"]
@@ -364,6 +411,8 @@ def build_engine(
             provider=provider,
             language=str(config["language"]),
             use_itn=bool(config["use_itn"]),
+            hotwords_file=hotwords_file,
+            hotwords_score=float(config["hotwords_score"]),
         )
     if model_type == "reazonspeech":
         selected_dir = (
@@ -425,7 +474,7 @@ class TextFormatter:
 
 
 def load_external_replacements(
-    path: str | Path = "replacements.json",
+    path: str | Path = REPLACEMENTS_PATH,
 ) -> dict[str, str]:
     """カレントディレクトリの replacements.json を読み込む。
 
@@ -461,6 +510,34 @@ def load_external_replacements(
                 value,
             )
     return result
+
+
+def ensure_hotwords_file(path: str | Path = HOTWORDS_PATH) -> None:
+    """hotwords.txt が無ければサンプルを生成する。"""
+    path = Path(path)
+    if path.exists():
+        return
+    try:
+        path.write_text(HOTWORDS_TEMPLATE, encoding="utf-8")
+        logger.info("ホットワードテンプレートを生成しました: %s", path)
+    except OSError as exc:
+        logger.warning("ホットワードテンプレートを生成できません: %s", exc)
+
+
+def count_hotwords(path: str | Path = HOTWORDS_PATH) -> int:
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return 0
+    return sum(1 for line in text.splitlines() if line.strip())
+
+
+def file_mtime_ns(path: str | Path) -> int:
+    try:
+        return Path(path).stat().st_mtime_ns
+    except OSError:
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -1300,14 +1377,22 @@ class VoiceInputApp:
         engine: OfflineAsrEngine,
         capture: AudioCapture,
         platform: PlatformIntegration,
+        engine_factory: Callable[[], OfflineAsrEngine] | None = None,
     ) -> None:
         self._config = config
         self._engine = engine
         self._capture = capture
         self._platform = platform
         self._sample_rate = int(config["sample_rate"])
+        self._engine_factory = engine_factory
+        self._engine_supports_hotwords = bool(
+            getattr(engine, "hotwords_supported", False)
+        )
+        self._replacements_path = REPLACEMENTS_PATH
+        self._hotwords_path = HOTWORDS_PATH
 
-        external_replacements = load_external_replacements()
+        ensure_hotwords_file(self._hotwords_path)
+        external_replacements = load_external_replacements(self._replacements_path)
         replacements = dict(config["replacements"])
         replacements.update(external_replacements)
         self._formatter = TextFormatter(
@@ -1315,6 +1400,9 @@ class VoiceInputApp:
             remove_tags=config["remove_tags"],
             remove_ja_spaces=config["remove_ja_spaces"],
         )
+        self._replacements_mtime_ns = file_mtime_ns(self._replacements_path)
+        self._hotwords_mtime_ns = file_mtime_ns(self._hotwords_path)
+        self._hotwords_count = count_hotwords(self._hotwords_path)
         highpass = bool(config["highpass"])
         denoise = bool(config["denoise"])
         self._preprocessor: AudioPreprocessor | None = None
@@ -1336,6 +1424,15 @@ class VoiceInputApp:
             else "OFF",
         )
         logger.info("置換辞書: %d件読み込み", len(external_replacements))
+        if self._hotwords_count == 0:
+            hotword_status = "OFF (0単語)"
+        elif self._engine_supports_hotwords:
+            hotword_status = f"ON ({self._hotwords_count}単語)"
+        else:
+            hotword_status = (
+                f"OFF ({self._hotwords_count}単語, このエンジンは未対応)"
+            )
+        logger.info("ホットワード: %s / ホットリロード: 有効", hotword_status)
 
         self._pre_roll_samples = max(
             0, int(self._sample_rate * config["pre_roll_ms"] / 1000)
@@ -1401,10 +1498,61 @@ class VoiceInputApp:
             self._queue.put(None)
             self._worker.join(timeout=2.0)
 
+    # -- ファイルのホットリロード -------------------------------------------
+    def _reload_if_changed(self) -> None:
+        replacement_mtime = file_mtime_ns(self._replacements_path)
+        if replacement_mtime != self._replacements_mtime_ns:
+            external = load_external_replacements(self._replacements_path)
+            replacements = dict(self._config["replacements"])
+            replacements.update(external)
+            self._formatter = TextFormatter(
+                replacements,
+                remove_tags=self._config["remove_tags"],
+                remove_ja_spaces=self._config["remove_ja_spaces"],
+            )
+            self._replacements_mtime_ns = file_mtime_ns(self._replacements_path)
+            logger.info(
+                "ホットリロード: 置換辞書を再読み込み (%d件)",
+                len(external),
+            )
+
+        hotwords_mtime = file_mtime_ns(self._hotwords_path)
+        if hotwords_mtime != self._hotwords_mtime_ns:
+            self._hotwords_mtime_ns = hotwords_mtime
+            self._hotwords_count = count_hotwords(self._hotwords_path)
+            logger.info(
+                "ホットリロード: ホットワードを再読み込み (%d単語)",
+                self._hotwords_count,
+            )
+            if self._engine_supports_hotwords and self._engine_factory is not None:
+                try:
+                    new_engine = self._engine_factory()
+                    self._engine = new_engine
+                    self._engine_supports_hotwords = bool(
+                        getattr(new_engine, "hotwords_supported", False)
+                    )
+                    logger.info("ホットリロード: 推論エンジンを再初期化しました")
+                except Exception as exc:
+                    logger.warning(
+                        "ホットリロード: エンジン再初期化に失敗しました "
+                        "(%s)。旧エンジンで継続します。",
+                        exc,
+                    )
+            elif self._engine_supports_hotwords:
+                logger.debug(
+                    "ホットリロード: エンジン再生成用のファクトリがありません"
+                )
+
     # -- キーイベント -------------------------------------------------------
     def _on_press(self, key: Any) -> None:
         try:
             if same_key(key, self._hotkey):
+                with self._lock:
+                    # 録音中の追加押下 (キーリピート) は何もしない。
+                    if self._recording:
+                        return
+                # 録音開始前に設定・辞書の変更を確認する。
+                self._reload_if_changed()
                 now = time.monotonic()
                 with self._lock:
                     # 1) 録音中の追加押下 (Windows のキーリピート) は完全に無視。
@@ -1599,6 +1747,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-threads", type=int, help="CPU 推論スレッド数")
     parser.add_argument("--provider", help="ONNX Runtime provider (cpu/cuda/coreml など)")
     parser.add_argument(
+        "--hotwords-score",
+        type=float,
+        help="SenseVoice のホットワードスコア (既定: 2.0)",
+    )
+    parser.add_argument(
         "--highpass",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -1661,6 +1814,8 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> Non
         config["num_threads"] = args.num_threads
     if args.provider:
         config["provider"] = args.provider
+    if args.hotwords_score is not None:
+        config["hotwords_score"] = args.hotwords_score
     if args.highpass is not None:
         config["highpass"] = args.highpass
     if args.denoise is not None:
@@ -1709,7 +1864,9 @@ def main(argv: list[str] | None = None) -> int:
             config["paste_key"],
         )
 
+        ensure_hotwords_file()
         engine = build_engine(config, model_dir=args.model_dir)
+        engine_factory = lambda: build_engine(config, model_dir=args.model_dir)
         platform = PlatformIntegration(defaults, paste_key=str(config["paste_key"]))
         capture = AudioCapture(
             sample_rate=int(config["sample_rate"]),
@@ -1718,7 +1875,13 @@ def main(argv: list[str] | None = None) -> int:
             device=config["device"],
             latency=config["input_latency"],
         )
-        app = VoiceInputApp(config, engine, capture, platform)
+        app = VoiceInputApp(
+            config,
+            engine,
+            capture,
+            platform,
+            engine_factory=engine_factory,
+        )
 
         capture.start()
         try:
