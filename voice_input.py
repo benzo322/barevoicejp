@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""超低遅延 Push-to-Talk 音声入力 (SenseVoice-Small / sherpa-onnx)。
+"""超低遅延 Push-to-Talk 音声入力 (SenseVoice / ReazonSpeech / sherpa-onnx)。
 
 キーを押している間だけ録音し、離した瞬間に推論してアクティブウィンドウへ
 Ctrl+V (macOS は Cmd+V) で貼り付ける、完全ローカルのプロトタイプ。
@@ -15,14 +15,19 @@ Ctrl+V (macOS は Cmd+V) で貼り付ける、完全ローカルのプロトタ�
 
 ■ モデル
     mkdir -p models && cd models
+    # SenseVoice-Small
     curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
     tar xf sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
+    # ReazonSpeech (Zipformer, 日本語)
+    curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2
+    tar xf sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2
 
-    既定の CONFIG["model_dir"] は上記の展開先。別の場所なら
-    --model-dir /path/to/model-dir を指定する。
+    CONFIG["model_dir"] は SenseVoice、CONFIG["reazonspeech_model_dir"] は
+    ReazonSpeech の展開先。別の場所なら --model-dir /path/to/model-dir を指定する。
 
 ■ 使い方
-    python3 voice_input.py
+    python3 voice_input.py                          # SenseVoice
+    python3 voice_input.py --model reazonspeech     # ReazonSpeech
     python3 voice_input.py --list-devices
     python3 voice_input.py --hotkey f9 --device 2
 
@@ -71,13 +76,17 @@ logger = logging.getLogger("voice_input")
 # ---------------------------------------------------------------------------
 CONFIG: dict[str, Any] = {
     # --- モデル ---
+    "model": "sensevoice",      # sensevoice / reazonspeech
     "model_dir": str(
         ROOT / "models" / "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17"
     ),
+    "reazonspeech_model_dir": str(
+        ROOT / "models" / "sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01"
+    ),
     "num_threads": 2,           # CPU 推論スレッド数
     "provider": "cpu",          # cpu / cuda / coreml など
-    "language": "auto",         # auto / ja / en / zh / ko / yue
-    "use_itn": True,            # 逆テキスト正規化 (数字・通貨など)
+    "language": "auto",         # SenseVoice のみ: auto / ja / en / zh / ko / yue
+    "use_itn": True,            # SenseVoice のみ: 逆テキスト正規化
 
     # --- 録音 / ホットキー (None = OS ごとの既定値) ---
     "hotkey": "alt_r",          # 右Alt (= Key.alt_r)。None なら OS 既定
@@ -113,10 +122,16 @@ CONFIG: dict[str, Any] = {
     },
 }
 
-MODEL_DOWNLOAD_HINT = """\
+SENSEVOICE_DOWNLOAD_HINT = """\
   mkdir -p models && cd models
   curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
   tar xf sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
+"""
+
+REAZONSPEECH_DOWNLOAD_HINT = """\
+  mkdir -p models && cd models
+  curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2
+  tar xf sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2
 """
 
 
@@ -142,8 +157,8 @@ class ClipboardError(VoiceInputError):
 # ---------------------------------------------------------------------------
 # モデル解決 / 推論エンジン
 # ---------------------------------------------------------------------------
-def resolve_model_files(model_dir: str | Path) -> tuple[Path, Path]:
-    """モデル (.onnx) と tokens.txt を探す。見つからなければ説明的な例外。"""
+def resolve_sensevoice_files(model_dir: str | Path) -> tuple[Path, Path]:
+    """SenseVoice のモデル (.onnx) と tokens.txt を探す。"""
     path = Path(model_dir).expanduser()
     if path.is_file():
         model_candidates = [path]
@@ -160,7 +175,7 @@ def resolve_model_files(model_dir: str | Path) -> tuple[Path, Path]:
         raise ModelNotFoundError(
             f"SenseVoice モデルが見つかりません: {base}\n"
             f"探したファイル: {', '.join(p.name for p in model_candidates)}\n"
-            f"次のいずれかで用意してください:\n{MODEL_DOWNLOAD_HINT}"
+            f"次のいずれかで用意してください:\n{SENSEVOICE_DOWNLOAD_HINT}"
             f"または --model-dir /path/to/model-dir を指定してください。"
         )
 
@@ -173,8 +188,68 @@ def resolve_model_files(model_dir: str | Path) -> tuple[Path, Path]:
     return model, tokens
 
 
-class SenseVoiceEngine:
-    """sherpa-onnx の OfflineRecognizer を薄く包む。"""
+def resolve_reazonspeech_files(
+    model_dir: str | Path,
+) -> tuple[Path, Path, Path, Path]:
+    """ReazonSpeech Zipformer の encoder/decoder/joiner/tokens を探す。"""
+    base = Path(model_dir).expanduser()
+    if base.is_file():
+        base = base.parent
+    expected = {
+        "encoder": base / "encoder-epoch-99-avg-1.int8.onnx",
+        "decoder": base / "decoder-epoch-99-avg-1.onnx",
+        "joiner": base / "joiner-epoch-99-avg-1.int8.onnx",
+        "tokens": base / "tokens.txt",
+    }
+    missing = [
+        f"{name}: {path.name}"
+        for name, path in expected.items()
+        if not path.is_file()
+    ]
+    if missing:
+        raise ModelNotFoundError(
+            f"ReazonSpeech モデルが見つかりません: {base}\n"
+            f"不足ファイル: {', '.join(missing)}\n"
+            f"次のコマンドで用意してください:\n{REAZONSPEECH_DOWNLOAD_HINT}"
+            f"または --model-dir /path/to/model-dir を指定してください。"
+        )
+    return (
+        expected["encoder"],
+        expected["decoder"],
+        expected["joiner"],
+        expected["tokens"],
+    )
+
+
+def load_sherpa_onnx() -> Any:
+    try:
+        import sherpa_onnx
+    except Exception as exc:
+        raise VoiceInputError(
+            "sherpa-onnx を読み込めません。\n"
+            "  python3 -m pip install sherpa-onnx\n"
+            f"  詳細: {exc}"
+        ) from exc
+    return sherpa_onnx
+
+
+class OfflineAsrEngine:
+    """sherpa-onnx OfflineRecognizer の共通推論パイプライン。"""
+
+    def __init__(self, recognizer: Any, sample_rate: int) -> None:
+        self._recognizer = recognizer
+        self.sample_rate = sample_rate
+
+    def transcribe(self, samples: np.ndarray) -> str:
+        """16kHz / mono / float32 の波形を文字起こしする。"""
+        stream = self._recognizer.create_stream()
+        stream.accept_waveform(self.sample_rate, samples)
+        self._recognizer.decode_stream(stream)
+        return stream.result.text
+
+
+class SenseVoiceEngine(OfflineAsrEngine):
+    """SenseVoice-Small 用のエンジン。"""
 
     def __init__(
         self,
@@ -185,20 +260,12 @@ class SenseVoiceEngine:
         language: str,
         use_itn: bool,
     ) -> None:
-        model, tokens = resolve_model_files(model_dir)
-        try:
-            import sherpa_onnx
-        except Exception as exc:
-            raise VoiceInputError(
-                "sherpa-onnx を読み込めません。\n"
-                "  python3 -m pip install sherpa-onnx\n"
-                f"  詳細: {exc}"
-            ) from exc
+        model, tokens = resolve_sensevoice_files(model_dir)
+        sherpa_onnx = load_sherpa_onnx()
 
-        self.sample_rate = sample_rate
-        logger.info("モデル読み込み: %s", model)
+        logger.info("SenseVoice モデル読み込み: %s", model)
         try:
-            self._recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
+            recognizer = sherpa_onnx.OfflineRecognizer.from_sense_voice(
                 model=str(model),
                 tokens=str(tokens),
                 num_threads=num_threads,
@@ -210,24 +277,94 @@ class SenseVoiceEngine:
             )
         except Exception as exc:
             raise VoiceInputError(
-                f"モデルの初期化に失敗しました: {model}\n"
+                f"SenseVoice モデルの初期化に失敗しました: {model}\n"
                 f"  provider={provider} / num_threads={num_threads}\n"
                 f"  詳細: {exc}"
             ) from exc
+        super().__init__(recognizer, sample_rate)
         logger.info(
-            "モデル準備完了 (ITN=%s, language=%s, threads=%d, provider=%s)",
+            "モデル準備完了 (SenseVoice / ITN=%s, language=%s, threads=%d, provider=%s)",
             "on" if use_itn else "off",
             language,
             num_threads,
             provider,
         )
 
-    def transcribe(self, samples: np.ndarray) -> str:
-        """16kHz / mono / float32 の波形を文字起こしする。"""
-        stream = self._recognizer.create_stream()
-        stream.accept_waveform(self.sample_rate, samples)
-        self._recognizer.decode_stream(stream)
-        return stream.result.text
+
+class ReazonSpeechEngine(OfflineAsrEngine):
+    """ReazonSpeech Zipformer (日本語) 用のエンジン。"""
+
+    def __init__(
+        self,
+        model_dir: str | Path,
+        sample_rate: int,
+        num_threads: int,
+        provider: str,
+    ) -> None:
+        encoder, decoder, joiner, tokens = resolve_reazonspeech_files(model_dir)
+        sherpa_onnx = load_sherpa_onnx()
+
+        logger.info("ReazonSpeech モデル読み込み: %s", encoder.parent)
+        try:
+            recognizer = sherpa_onnx.OfflineRecognizer.from_transducer(
+                encoder=str(encoder),
+                decoder=str(decoder),
+                joiner=str(joiner),
+                tokens=str(tokens),
+                num_threads=num_threads,
+                sample_rate=sample_rate,
+                decoding_method="greedy_search",
+                provider=provider,
+                debug=False,
+            )
+        except Exception as exc:
+            raise VoiceInputError(
+                f"ReazonSpeech モデルの初期化に失敗しました: {encoder.parent}\n"
+                f"  provider={provider} / num_threads={num_threads}\n"
+                f"  詳細: {exc}"
+            ) from exc
+        super().__init__(recognizer, sample_rate)
+        logger.info(
+            "モデル準備完了 (ReazonSpeech / threads=%d, provider=%s)",
+            num_threads,
+            provider,
+        )
+
+
+def build_engine(
+    config: dict[str, Any],
+    model_dir: str | Path | None = None,
+) -> OfflineAsrEngine:
+    """CONFIG["model"] に応じて推論エンジンを生成する。"""
+    model_type = str(config["model"]).lower()
+    sample_rate = int(config["sample_rate"])
+    num_threads = int(config["num_threads"])
+    provider = str(config["provider"])
+
+    if model_type == "sensevoice":
+        selected_dir = model_dir if model_dir is not None else config["model_dir"]
+        return SenseVoiceEngine(
+            model_dir=selected_dir,
+            sample_rate=sample_rate,
+            num_threads=num_threads,
+            provider=provider,
+            language=str(config["language"]),
+            use_itn=bool(config["use_itn"]),
+        )
+    if model_type == "reazonspeech":
+        selected_dir = (
+            model_dir if model_dir is not None else config["reazonspeech_model_dir"]
+        )
+        return ReazonSpeechEngine(
+            model_dir=selected_dir,
+            sample_rate=sample_rate,
+            num_threads=num_threads,
+            provider=provider,
+        )
+    raise VoiceInputError(
+        f"不明なモデル種別です: {config['model']} "
+        "(sensevoice / reazonspeech)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -978,7 +1115,7 @@ class VoiceInputApp:
     def __init__(
         self,
         config: dict[str, Any],
-        engine: SenseVoiceEngine,
+        engine: OfflineAsrEngine,
         capture: AudioCapture,
         platform: PlatformIntegration,
     ) -> None:
@@ -1215,10 +1352,18 @@ class VoiceInputApp:
 # ---------------------------------------------------------------------------
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="SenseVoice-Small を使う Push-to-Talk 音声入力",
+        description="SenseVoice / ReazonSpeech を使う Push-to-Talk 音声入力",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--model-dir", help="SenseVoice モデルのディレクトリ")
+    parser.add_argument(
+        "--model",
+        choices=["sensevoice", "reazonspeech"],
+        help="推論モデル",
+    )
+    parser.add_argument(
+        "--model-dir",
+        help="選択したモデルのディレクトリ",
+    )
     parser.add_argument(
         "--hotkey",
         help="押している間だけ録音するキー (例: ctrl_r, alt_r, f9)",
@@ -1234,7 +1379,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--language",
         choices=["auto", "ja", "en", "zh", "ko", "yue"],
-        help="認識言語",
+        help="SenseVoice の認識言語 (ReazonSpeech では無視)",
     )
     parser.add_argument("--num-threads", type=int, help="CPU 推論スレッド数")
     parser.add_argument("--provider", help="ONNX Runtime provider (cpu/cuda/coreml など)")
@@ -1263,7 +1408,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--itn",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="逆テキスト正規化 (数字・通貨など) を有効にする",
+        help="SenseVoice の逆テキスト正規化 (数字・通貨など)",
     )
     parser.add_argument(
         "--list-devices",
@@ -1275,8 +1420,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> None:
-    if args.model_dir:
-        config["model_dir"] = args.model_dir
+    if args.model:
+        config["model"] = args.model
     if args.hotkey:
         config["hotkey"] = args.hotkey
     if args.paste_modifier:
@@ -1333,14 +1478,7 @@ def main(argv: list[str] | None = None) -> int:
             config["paste_key"],
         )
 
-        engine = SenseVoiceEngine(
-            model_dir=config["model_dir"],
-            sample_rate=int(config["sample_rate"]),
-            num_threads=int(config["num_threads"]),
-            provider=str(config["provider"]),
-            language=str(config["language"]),
-            use_itn=bool(config["use_itn"]),
-        )
+        engine = build_engine(config, model_dir=args.model_dir)
         platform = PlatformIntegration(defaults, paste_key=str(config["paste_key"]))
         capture = AudioCapture(
             sample_rate=int(config["sample_rate"]),
