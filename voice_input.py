@@ -6,6 +6,7 @@ Ctrl+V (macOS は Cmd+V) で貼り付ける、完全ローカルのプロトタ�
 
 ■ インストール
     python3 -m pip install sherpa-onnx sounddevice pynput pyperclip numpy
+    python3 -m pip install rapidfuzz             # words.txt のファジーマッチ
 
     # 音響前処理を明示的に使う場合のみ
     python3 -m pip install scipy                 # --highpass 用
@@ -39,9 +40,11 @@ Ctrl+V (macOS は Cmd+V) で貼り付ける、完全ローカルのプロトタ�
     python3 voice_input.py --hotkey f9 --device 2
 
     既定では録音バッファをそのまま推論へ渡す (前処理なし)。
-    カレントディレクトリの replacements.json と hotwords.txt を自動で
-    読み込む (存在しない場合はテンプレートを生成)。録音開始時に mtime を
-    確認し、変更があれば自動で再読み込みする (ホットリロード)。
+    カレントディレクトリの replacements.json / hotwords.txt / words.txt を
+    自動で読み込む (存在しない場合はテンプレートを生成)。録音開始時に mtime
+    を確認し、変更があれば自動で再読み込みする (ホットリロード)。
+    words.txt は「正式表記 : 代表読み」形式で、4文字以上の語に
+    rapidfuzz によるファジーマッチを適用する。
     既定の録音キーは右 Alt (macOS は右 Option)。
     押している間だけ録音。離すと推論して貼り付け。
     録音中に Esc を押すとキャンセル。0.2 秒未満の押下も破棄。
@@ -87,7 +90,15 @@ logger = logging.getLogger("voice_input")
 
 REPLACEMENTS_PATH = Path("replacements.json")
 HOTWORDS_PATH = Path("hotwords.txt")
+WORDS_PATH = Path("words.txt")
 HOTWORDS_TEMPLATE = "GitHub Actions\nDocker\nAPI\n"
+WORDS_TEMPLATE = """\
+# 正式表記 : 代表読み
+# 読みが4文字以上かつ正式表記が4文字以上の項目だけファジーマッチ対象
+GitHub Actions : ギットハブアクションズ
+Docker : ドッカー
+API : エーピーアイ
+"""
 
 # ---------------------------------------------------------------------------
 # ここを 1 行ずつ変えれば主要な挙動を調整できる。
@@ -133,6 +144,7 @@ CONFIG: dict[str, Any] = {
     # --- テキスト整形 ---
     "remove_tags": True,        # <|...|> などのタグを除去
     "remove_ja_spaces": True,   # 日本語文字間の不要な空白を削除
+    "fuzzy_threshold": 80.0,    # rapidfuzz の類似度しきい値 (0-100)
     "replacements": {
         "えーぴーあい": "API",
         "えーぴーアイ": "API",
@@ -438,25 +450,120 @@ _SPECIAL_TOKEN_RE = re.compile(r"</?(?:s|unk|pad|blank)>", re.IGNORECASE)
 # 日本語 (かな・漢字) 同士の間の空白だけを削除する。英語や数字の空白は残す。
 _JA_CHARS = r"\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\u3005\u3006"
 _JA_SPACE_RE = re.compile(rf"(?<=[{_JA_CHARS}])\s+(?=[{_JA_CHARS}])")
+_ASCII_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._+\-/]*")
+
+
+@dataclass(frozen=True)
+class WordEntry:
+    target: str
+    reading: str | None = None
 
 
 class TextFormatter:
-    """タグ除去・空白正規化・置換辞書。"""
+    """タグ除去・空白正規化・完全一致/ファジー置換。"""
 
     def __init__(
         self,
         replacements: dict[str, str],
+        words: list[WordEntry] | None = None,
+        fuzzy_threshold: float = 80.0,
         remove_tags: bool = True,
         remove_ja_spaces: bool = True,
     ) -> None:
         self._remove_tags = remove_tags
         self._remove_ja_spaces = remove_ja_spaces
+        self._fuzzy_threshold = max(0.0, min(100.0, float(fuzzy_threshold)))
+
+        exact = dict(replacements)
+        fuzzy_entries: list[WordEntry] = []
+        for entry in words or []:
+            if entry.reading is None:
+                # コロン無しの英字は完全一致のみ (既存の置換を上書きしない)
+                exact.setdefault(entry.target, entry.target)
+            else:
+                exact[entry.reading] = entry.target
+                # 読みが短い語や API/PR/DB のような短い正式名は誤爆防止のため
+                # ファジーマッチ対象外にする。
+                if len(entry.reading) >= 4 and len(entry.target) >= 4:
+                    fuzzy_entries.append(entry)
+
         # 長いキーを先に置換する ("えーぴーあい" と "えーあい" の競合対策)
         self._replacements = sorted(
-            ((k, v) for k, v in replacements.items() if k),
+            ((k, v) for k, v in exact.items() if k),
             key=lambda kv: len(kv[0]),
             reverse=True,
         )
+        self._fuzzy_entries = sorted(
+            fuzzy_entries,
+            key=lambda entry: len(entry.reading or ""),
+            reverse=True,
+        )
+        self._fuzz: Any = None
+        if self._fuzzy_entries:
+            try:
+                from rapidfuzz import fuzz
+            except Exception as exc:
+                logger.warning(
+                    "rapidfuzz を読み込めないためファジーマッチを無効化します: %s",
+                    exc,
+                )
+                self._fuzzy_entries = []
+            else:
+                self._fuzz = fuzz
+
+    def _apply_fuzzy(self, text: str) -> str:
+        if not self._fuzzy_entries or self._fuzz is None or not text:
+            return text
+
+        # (score, window_len, start, entry)
+        candidates: list[tuple[float, int, int, WordEntry]] = []
+        text_len = len(text)
+        for entry in self._fuzzy_entries:
+            reading = entry.reading
+            if not reading:
+                continue
+            reading_len = len(reading)
+            for window_len in range(
+                max(1, reading_len - 2),
+                reading_len + 3,
+            ):
+                if window_len > text_len:
+                    continue
+                for start in range(0, text_len - window_len + 1):
+                    window = text[start:start + window_len]
+                    score = float(self._fuzz.ratio(reading, window))
+                    if score >= self._fuzzy_threshold:
+                        candidates.append((score, window_len, start, entry))
+
+        if not candidates:
+            return text
+
+        # 長い部分一致を優先し、次に類似度、次に開始位置の早い順。
+        candidates.sort(
+            key=lambda item: (item[1], item[0], -item[2]),
+            reverse=True,
+        )
+        occupied = [False] * text_len
+        selected: list[tuple[int, int, str]] = []
+        for _score, window_len, start, entry in candidates:
+            end = start + window_len
+            if any(occupied[start:end]):
+                continue
+            for index in range(start, end):
+                occupied[index] = True
+            selected.append((start, end, entry.target))
+
+        if not selected:
+            return text
+        selected.sort(key=lambda item: item[0])
+        parts: list[str] = []
+        position = 0
+        for start, end, target in selected:
+            parts.append(text[position:start])
+            parts.append(target)
+            position = end
+        parts.append(text[position:])
+        return "".join(parts)
 
     def format(self, text: str) -> str:
         if not text:
@@ -468,6 +575,7 @@ class TextFormatter:
         text = re.sub(r"\s+", " ", text).strip()
         if self._remove_ja_spaces:
             text = _JA_SPACE_RE.sub("", text)
+        text = self._apply_fuzzy(text)
         for src, dst in self._replacements:
             text = text.replace(src, dst)
         return text.strip()
@@ -538,6 +646,61 @@ def file_mtime_ns(path: str | Path) -> int:
         return Path(path).stat().st_mtime_ns
     except OSError:
         return 0
+
+
+def ensure_words_file(path: str | Path = WORDS_PATH) -> None:
+    """words.txt が無ければサンプルを生成する。"""
+    path = Path(path)
+    if path.exists():
+        return
+    try:
+        path.write_text(WORDS_TEMPLATE, encoding="utf-8")
+        logger.info("単語辞書テンプレートを生成しました: %s", path)
+    except OSError as exc:
+        logger.warning("単語辞書テンプレートを生成できません: %s", exc)
+
+
+def load_words(path: str | Path = WORDS_PATH) -> list[WordEntry]:
+    """words.txt を解析する。存在しなければ空リスト。"""
+    path = Path(path)
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return []
+
+    entries: list[WordEntry] = []
+    seen: set[tuple[str, str | None]] = set()
+    for line_no, raw_line in enumerate(text.splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" in line or "：" in line:
+            separator = ":" if ":" in line else "："
+            target, reading = line.split(separator, 1)
+            target = target.strip()
+            reading = reading.strip()
+            if not target or not reading:
+                logger.warning(
+                    "%s:%d: 正式表記または読みが空のため無視します",
+                    path,
+                    line_no,
+                )
+                continue
+        else:
+            target = line
+            if _ASCII_WORD_RE.fullmatch(target):
+                # コロン無しの英字は完全一致のみ
+                reading = None
+            else:
+                # 読みが無い日本語は語自体を読みとして扱う
+                reading = target
+
+        key = (target, reading)
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(WordEntry(target, reading))
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -1390,18 +1553,26 @@ class VoiceInputApp:
         )
         self._replacements_path = REPLACEMENTS_PATH
         self._hotwords_path = HOTWORDS_PATH
+        self._words_path = WORDS_PATH
 
         ensure_hotwords_file(self._hotwords_path)
+        ensure_words_file(self._words_path)
         external_replacements = load_external_replacements(self._replacements_path)
+        words = load_words(self._words_path)
         replacements = dict(config["replacements"])
         replacements.update(external_replacements)
         self._formatter = TextFormatter(
             replacements,
+            words=words,
+            fuzzy_threshold=float(config["fuzzy_threshold"]),
             remove_tags=config["remove_tags"],
             remove_ja_spaces=config["remove_ja_spaces"],
         )
+        self._external_replacements = external_replacements
+        self._words = words
         self._replacements_mtime_ns = file_mtime_ns(self._replacements_path)
         self._hotwords_mtime_ns = file_mtime_ns(self._hotwords_path)
+        self._words_mtime_ns = file_mtime_ns(self._words_path)
         self._hotwords_count = count_hotwords(self._hotwords_path)
         highpass = bool(config["highpass"])
         denoise = bool(config["denoise"])
@@ -1424,6 +1595,7 @@ class VoiceInputApp:
             else "OFF",
         )
         logger.info("置換辞書: %d件読み込み", len(external_replacements))
+        logger.info("単語辞書: %d件読み込み", len(words))
         if self._hotwords_count == 0:
             hotword_status = "OFF (0単語)"
         elif self._engine_supports_hotwords:
@@ -1500,20 +1672,40 @@ class VoiceInputApp:
 
     # -- ファイルのホットリロード -------------------------------------------
     def _reload_if_changed(self) -> None:
+        replacements_changed = False
+        words_changed = False
+
         replacement_mtime = file_mtime_ns(self._replacements_path)
         if replacement_mtime != self._replacements_mtime_ns:
-            external = load_external_replacements(self._replacements_path)
-            replacements = dict(self._config["replacements"])
-            replacements.update(external)
-            self._formatter = TextFormatter(
-                replacements,
-                remove_tags=self._config["remove_tags"],
-                remove_ja_spaces=self._config["remove_ja_spaces"],
+            self._external_replacements = load_external_replacements(
+                self._replacements_path
             )
             self._replacements_mtime_ns = file_mtime_ns(self._replacements_path)
+            replacements_changed = True
             logger.info(
                 "ホットリロード: 置換辞書を再読み込み (%d件)",
-                len(external),
+                len(self._external_replacements),
+            )
+
+        words_mtime = file_mtime_ns(self._words_path)
+        if words_mtime != self._words_mtime_ns:
+            self._words = load_words(self._words_path)
+            self._words_mtime_ns = file_mtime_ns(self._words_path)
+            words_changed = True
+            logger.info(
+                "ホットリロード: 単語辞書を再読み込み (%d件)",
+                len(self._words),
+            )
+
+        if replacements_changed or words_changed:
+            replacements = dict(self._config["replacements"])
+            replacements.update(self._external_replacements)
+            self._formatter = TextFormatter(
+                replacements,
+                words=self._words,
+                fuzzy_threshold=float(self._config["fuzzy_threshold"]),
+                remove_tags=self._config["remove_tags"],
+                remove_ja_spaces=self._config["remove_ja_spaces"],
             )
 
         hotwords_mtime = file_mtime_ns(self._hotwords_path)
