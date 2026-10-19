@@ -144,7 +144,7 @@ CONFIG: dict[str, Any] = {
     # --- テキスト整形 ---
     "remove_tags": True,        # <|...|> などのタグを除去
     "remove_ja_spaces": True,   # 日本語文字間の不要な空白を削除
-    "fuzzy_threshold": 80.0,    # rapidfuzz の類似度しきい値 (0-100)
+    "fuzzy_threshold": 80.0,    # 6文字以上の読みは 75 まで許容
     "replacements": {
         "えーぴーあい": "API",
         "えーぴーアイ": "API",
@@ -450,7 +450,10 @@ _SPECIAL_TOKEN_RE = re.compile(r"</?(?:s|unk|pad|blank)>", re.IGNORECASE)
 # 日本語 (かな・漢字) 同士の間の空白だけを削除する。英語や数字の空白は残す。
 _JA_CHARS = r"\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\u3005\u3006"
 _JA_SPACE_RE = re.compile(rf"(?<=[{_JA_CHARS}])\s+(?=[{_JA_CHARS}])")
+_JA_CHAR_RE = re.compile(rf"[{_JA_CHARS}]")
 _ASCII_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._+\-/]*")
+_ASCII_ALPHA_RE = re.compile(r"[A-Za-z]")
+_PARTICLES = frozenset("でにをはがのとへも")
 
 
 @dataclass(frozen=True)
@@ -488,11 +491,14 @@ class TextFormatter:
                     fuzzy_entries.append(entry)
 
         # 長いキーを先に置換する ("えーぴーあい" と "えーあい" の競合対策)
-        self._replacements = sorted(
-            ((k, v) for k, v in exact.items() if k),
-            key=lambda kv: len(kv[0]),
-            reverse=True,
-        )
+        self._replacements = [
+            (re.compile(re.escape(key)), value)
+            for key, value in sorted(
+                ((k, v) for k, v in exact.items() if k),
+                key=lambda kv: len(kv[0]),
+                reverse=True,
+            )
+        ]
         self._fuzzy_entries = sorted(
             fuzzy_entries,
             key=lambda entry: len(entry.reading or ""),
@@ -509,44 +515,103 @@ class TextFormatter:
                 )
                 self._fuzzy_entries = []
             else:
-                self._fuzz = fuzz
+                if not hasattr(fuzz, "partial_ratio_alignment"):
+                    logger.warning(
+                        "rapidfuzz が partial_ratio_alignment 非対応のため"
+                        "ファジーマッチを無効化します"
+                    )
+                    self._fuzzy_entries = []
+                else:
+                    self._fuzz = fuzz
+
+    def _with_boundary_spaces(
+        self,
+        text: str,
+        start: int,
+        end: int,
+        replacement: str,
+    ) -> str:
+        """英字の正式表記と隣接する日本語の間に半角スペースを補う。"""
+        if not replacement:
+            return replacement
+        if (
+            start > 0
+            and _ASCII_ALPHA_RE.fullmatch(replacement[0])
+            and _JA_CHAR_RE.fullmatch(text[start - 1])
+            and not replacement.startswith(" ")
+        ):
+            replacement = " " + replacement
+        if (
+            end < len(text)
+            and _ASCII_ALPHA_RE.fullmatch(replacement[-1])
+            and _JA_CHAR_RE.fullmatch(text[end])
+            and not replacement.endswith(" ")
+        ):
+            replacement += " "
+        return replacement
 
     def _apply_fuzzy(self, text: str) -> str:
         if not self._fuzzy_entries or self._fuzz is None or not text:
             return text
 
-        # (score, window_len, start, entry)
+        # (score, match_len, start, entry)
         candidates: list[tuple[float, int, int, WordEntry]] = []
         text_len = len(text)
         for entry in self._fuzzy_entries:
             reading = entry.reading
             if not reading:
                 continue
-            reading_len = len(reading)
-            for window_len in range(
-                max(1, reading_len - 2),
-                reading_len + 3,
-            ):
-                if window_len > text_len:
+
+            # 最も類似度が高いコア区間だけを取得する。
+            alignment = self._fuzz.partial_ratio_alignment(reading, text)
+            if alignment is None:
+                continue
+            start = int(alignment.dest_start)
+            end = int(alignment.dest_end)
+            if start < 0 or end <= start or end > text_len:
+                continue
+
+            # 末尾の助詞は置換に巻き込まず、元のテキストに残す。
+            score = float(alignment.score)
+            if text[end - 1] in _PARTICLES:
+                end -= 1
+                if end <= start:
                     continue
-                for start in range(0, text_len - window_len + 1):
-                    window = text[start:start + window_len]
-                    score = float(self._fuzz.ratio(reading, window))
-                    if score >= self._fuzzy_threshold:
-                        candidates.append((score, window_len, start, entry))
+                score = float(self._fuzz.ratio(reading, text[start:end]))
+
+            # partial_ratio は短い断片でも 100 になり得るため、
+            # コア長が読みの ±2 文字に収まることを要求する。
+            core_len = end - start
+            if core_len < max(1, len(reading) - 2) or core_len > len(reading) + 2:
+                continue
+
+            # 読みが長い語は揺れを拾いやすくするため 75 まで許容。
+            threshold = (
+                min(self._fuzzy_threshold, 75.0)
+                if len(reading) >= 6
+                else self._fuzzy_threshold
+            )
+            if score < threshold:
+                continue
+            candidates.append((score, end - start, start, entry))
 
         if not candidates:
             return text
 
-        # 長い部分一致を優先し、次に類似度、次に開始位置の早い順。
+        # 登録読みが長い単語を優先し、次にマッチ長、類似度、開始位置の早い順。
         candidates.sort(
-            key=lambda item: (item[1], item[0], -item[2]),
+            key=lambda item: (
+                len(item[3].reading or ""),
+                item[1],
+                item[0],
+                -item[2],
+            ),
             reverse=True,
         )
         occupied = [False] * text_len
         selected: list[tuple[int, int, str]] = []
-        for _score, window_len, start, entry in candidates:
-            end = start + window_len
+        for _score, match_len, start, entry in candidates:
+            end = start + match_len
             if any(occupied[start:end]):
                 continue
             for index in range(start, end):
@@ -560,10 +625,25 @@ class TextFormatter:
         position = 0
         for start, end, target in selected:
             parts.append(text[position:start])
-            parts.append(target)
+            parts.append(self._with_boundary_spaces(text, start, end, target))
             position = end
         parts.append(text[position:])
         return "".join(parts)
+
+    @staticmethod
+    def _normalize_ascii_japanese_boundaries(text: str) -> str:
+        """英字と日本語が直接隣接している箇所に半角スペースを入れる。"""
+        text = re.sub(
+            rf"(?<=[A-Za-z])(?=[{_JA_CHARS}])",
+            " ",
+            text,
+        )
+        text = re.sub(
+            rf"(?<=[{_JA_CHARS}])(?=[A-Za-z])",
+            " ",
+            text,
+        )
+        return re.sub(r" {2,}", " ", text)
 
     def format(self, text: str) -> str:
         if not text:
@@ -576,8 +656,17 @@ class TextFormatter:
         if self._remove_ja_spaces:
             text = _JA_SPACE_RE.sub("", text)
         text = self._apply_fuzzy(text)
-        for src, dst in self._replacements:
-            text = text.replace(src, dst)
+        for pattern, target in self._replacements:
+            text = pattern.sub(
+                lambda match, target=target: self._with_boundary_spaces(
+                    text,
+                    match.start(),
+                    match.end(),
+                    target,
+                ),
+                text,
+            )
+        text = self._normalize_ascii_japanese_boundaries(text)
         return text.strip()
 
 
