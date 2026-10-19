@@ -6,6 +6,8 @@ Ctrl+V (macOS は Cmd+V) で貼り付ける、完全ローカルのプロトタ�
 
 ■ インストール
     python3 -m pip install sherpa-onnx sounddevice pynput pyperclip numpy
+    python3 -m pip install scipy                 # ハイパスフィルタ
+    python3 -m pip install pyrnnoise             # 任意: ノイズリダクション
 
     # Linux (PortAudio とクリップボード用ツール)
     sudo apt install libportaudio2 xclip        # Wayland なら wl-clipboard
@@ -28,9 +30,13 @@ Ctrl+V (macOS は Cmd+V) で貼り付ける、完全ローカルのプロトタ�
 ■ 使い方
     python3 voice_input.py                          # SenseVoice
     python3 voice_input.py --model reazonspeech     # ReazonSpeech
+    python3 voice_input.py --denoise                # RNNoise を有効化
+    python3 voice_input.py --no-highpass            # HPF を無効化
     python3 voice_input.py --list-devices
     python3 voice_input.py --hotkey f9 --device 2
 
+    カレントディレクトリの replacements.json を自動で読み込む
+    (存在しない場合は空のテンプレートを生成)。
     既定の録音キーは右 Alt (macOS は右 Option)。
     押している間だけ録音。離すと推論して貼り付け。
     録音中に Esc を押すとキャンセル。0.2 秒未満の押下も破棄。
@@ -52,6 +58,7 @@ Ctrl+V (macOS は Cmd+V) で貼り付ける、完全ローカルのプロトタ�
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import platform as platform_module
@@ -101,6 +108,10 @@ CONFIG: dict[str, Any] = {
     "repeat_guard_ms": 250,     # キーリピート/直後の再押下を無視する時間
     "ring_seconds": 60.0,       # 常時保持する音声バッファ長
     "device": None,             # 入力デバイス番号 or 名前の一部
+
+    # --- 音響前処理 ---
+    "highpass": True,           # 80Hz の 2 次バターワース HPF
+    "denoise": False,           # RNNoise (pyrnnoise が必要)
 
     # --- 貼り付け / クリップボード ---
     "paste_delay_ms": 50,       # クリップボード設定後、貼り付けまでの待機
@@ -410,6 +421,45 @@ class TextFormatter:
         return text.strip()
 
 
+def load_external_replacements(
+    path: str | Path = "replacements.json",
+) -> dict[str, str]:
+    """カレントディレクトリの replacements.json を読み込む。
+
+    存在しない場合は空の JSON テンプレートを生成する。
+    """
+    path = Path(path)
+    if not path.exists():
+        try:
+            path.write_text("{}\n", encoding="utf-8")
+            logger.info("置換辞書テンプレートを生成しました: %s", path)
+        except OSError as exc:
+            logger.warning("置換辞書テンプレートを生成できません: %s", exc)
+        return {}
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        logger.warning("置換辞書を読み込めません (%s): %s", path, exc)
+        return {}
+
+    if not isinstance(data, dict):
+        logger.warning("置換辞書は JSON オブジェクトである必要があります: %s", path)
+        return {}
+
+    result: dict[str, str] = {}
+    for key, value in data.items():
+        if isinstance(key, str) and isinstance(value, str) and key:
+            result[key] = value
+        else:
+            logger.warning(
+                "置換辞書の不正な項目を無視します: %r -> %r",
+                key,
+                value,
+            )
+    return result
+
+
 # ---------------------------------------------------------------------------
 # 音声キャプチャ (常時リングバッファへ書き込み、プリアロールを可能にする)
 # ---------------------------------------------------------------------------
@@ -637,6 +687,135 @@ class AudioCapture:
             stream.close()
         except Exception:
             logger.debug("録音ストリームクローズ時の例外", exc_info=True)
+
+
+class HighpassFilter:
+    """80Hz カットの 2 次バターワースハイパスフィルタ。"""
+
+    def __init__(
+        self,
+        sample_rate: int,
+        cutoff_hz: float = 80.0,
+        order: int = 2,
+    ) -> None:
+        try:
+            from scipy.signal import butter
+        except Exception as exc:
+            raise VoiceInputError(
+                "ハイパスフィルタには scipy が必要です。\n"
+                "  python3 -m pip install scipy\n"
+                f"  詳細: {exc}"
+            ) from exc
+        self._sos = butter(
+            order,
+            cutoff_hz,
+            btype="highpass",
+            fs=sample_rate,
+            output="sos",
+        )
+        self.cutoff_hz = cutoff_hz
+        self.order = order
+
+    def apply(self, samples: np.ndarray) -> np.ndarray:
+        if samples.size == 0:
+            return samples
+        from scipy.signal import sosfilt
+
+        return sosfilt(self._sos, samples).astype(np.float32, copy=False)
+
+
+class RnNoiseDenoiser:
+    """pyrnnoise によるノイズ抑制。利用できなければ呼び出し側で無効化する。"""
+
+    def __init__(self, sample_rate: int) -> None:
+        try:
+            from pyrnnoise import RNNoise
+        except Exception as exc:
+            raise VoiceInputError(
+                "pyrnnoise を読み込めません。\n"
+                "  python3 -m pip install pyrnnoise\n"
+                f"  詳細: {exc}"
+            ) from exc
+        try:
+            self._denoiser = RNNoise(sample_rate=sample_rate)
+        except Exception as exc:
+            raise VoiceInputError(
+                f"pyrnnoise の初期化に失敗しました: {exc}"
+            ) from exc
+        self._failed = False
+
+    def apply(self, samples: np.ndarray) -> np.ndarray:
+        if samples.size == 0 or self._failed:
+            return samples
+
+        # pyrnnoise は int16 入力を受け取り、内部で 48kHz にリサンプルする。
+        int_samples = np.clip(
+            samples * 32768.0, -32768, 32767
+        ).astype(np.int16)
+        frames: list[np.ndarray] = []
+        try:
+            for _, frame in self._denoiser.denoise_chunk(int_samples, partial=True):
+                frame = np.asarray(frame, dtype=np.int16).reshape(-1)
+                if frame.size:
+                    frames.append(frame)
+        except Exception as exc:
+            self._failed = True
+            logger.warning(
+                "ノイズリダクションに失敗したため、以降はバイパスします: %s",
+                exc,
+            )
+            return samples
+
+        if not frames:
+            return samples
+        output = np.concatenate(frames).astype(np.float32) / 32768.0
+        # リサンプラの端数で長さがずれる場合があるため、入力長に合わせる。
+        if output.size > samples.size:
+            output = output[: samples.size]
+        elif output.size < samples.size:
+            output = np.pad(output, (0, samples.size - output.size))
+        return output
+
+
+class AudioPreprocessor:
+    """ハイパスフィルタとノイズリダクションをまとめて適用する。"""
+
+    def __init__(
+        self,
+        sample_rate: int,
+        highpass: bool = True,
+        denoise: bool = False,
+    ) -> None:
+        self._highpass = (
+            HighpassFilter(sample_rate, cutoff_hz=80.0, order=2)
+            if highpass
+            else None
+        )
+        self._denoiser: RnNoiseDenoiser | None = None
+        if denoise:
+            try:
+                self._denoiser = RnNoiseDenoiser(sample_rate)
+            except Exception as exc:
+                logger.warning(
+                    "ノイズリダクションを無効化して続行します: %s",
+                    exc,
+                )
+
+    @property
+    def highpass_enabled(self) -> bool:
+        return self._highpass is not None
+
+    @property
+    def denoise_enabled(self) -> bool:
+        return self._denoiser is not None
+
+    def process(self, samples: np.ndarray) -> np.ndarray:
+        output = samples
+        if self._highpass is not None:
+            output = self._highpass.apply(output)
+        if self._denoiser is not None:
+            output = self._denoiser.apply(output)
+        return output
 
 
 def list_input_devices() -> int:
@@ -1123,13 +1302,28 @@ class VoiceInputApp:
         self._engine = engine
         self._capture = capture
         self._platform = platform
+        self._sample_rate = int(config["sample_rate"])
+
+        external_replacements = load_external_replacements()
+        replacements = dict(config["replacements"])
+        replacements.update(external_replacements)
         self._formatter = TextFormatter(
-            config["replacements"],
+            replacements,
             remove_tags=config["remove_tags"],
             remove_ja_spaces=config["remove_ja_spaces"],
         )
+        self._preprocessor = AudioPreprocessor(
+            self._sample_rate,
+            highpass=bool(config["highpass"]),
+            denoise=bool(config["denoise"]),
+        )
+        logger.info(
+            "ハイパス: %s / ノイズリダクション: %s",
+            "ON" if self._preprocessor.highpass_enabled else "OFF",
+            "ON" if self._preprocessor.denoise_enabled else "OFF",
+        )
+        logger.info("置換辞書: %d件読み込み", len(external_replacements))
 
-        self._sample_rate = int(config["sample_rate"])
         self._pre_roll_samples = max(
             0, int(self._sample_rate * config["pre_roll_ms"] / 1000)
         )
@@ -1287,6 +1481,13 @@ class VoiceInputApp:
         if self._capture.xruns:
             logger.debug("PortAudio xruns: %d", self._capture.xruns)
 
+        preprocess_started = time.perf_counter()
+        audio = self._preprocessor.process(audio)
+        logger.debug(
+            "前処理時間: %.1f ms",
+            (time.perf_counter() - preprocess_started) * 1000.0,
+        )
+
         peak = float(np.max(np.abs(audio)))
         if peak < 1e-4:
             logger.warning("マイク入力がほぼ無音です (デバイス設定を確認してください)")
@@ -1384,6 +1585,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-threads", type=int, help="CPU 推論スレッド数")
     parser.add_argument("--provider", help="ONNX Runtime provider (cpu/cuda/coreml など)")
     parser.add_argument(
+        "--highpass",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="80Hz の 2 次バターワースハイパスフィルタ (既定: ON)",
+    )
+    parser.add_argument(
+        "--denoise",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="RNNoise ノイズリダクション (既定: OFF, pyrnnoise が必要)",
+    )
+    parser.add_argument(
         "--pre-roll-ms",
         type=int,
         help="押下直前の音声を先頭に含める長さ (ms)",
@@ -1434,6 +1647,10 @@ def apply_cli_overrides(config: dict[str, Any], args: argparse.Namespace) -> Non
         config["num_threads"] = args.num_threads
     if args.provider:
         config["provider"] = args.provider
+    if args.highpass is not None:
+        config["highpass"] = args.highpass
+    if args.denoise is not None:
+        config["denoise"] = args.denoise
     if args.pre_roll_ms is not None:
         config["pre_roll_ms"] = args.pre_roll_ms
     if args.min_duration_ms is not None:
