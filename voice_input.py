@@ -6,8 +6,10 @@ Ctrl+V (macOS は Cmd+V) で貼り付ける、完全ローカルのプロトタ�
 
 ■ インストール
     python3 -m pip install sherpa-onnx sounddevice pynput pyperclip numpy
-    python3 -m pip install scipy                 # ハイパスフィルタ
-    python3 -m pip install pyrnnoise             # 任意: ノイズリダクション
+
+    # 音響前処理を明示的に使う場合のみ
+    python3 -m pip install scipy                 # --highpass 用
+    python3 -m pip install pyrnnoise             # --denoise 用
 
     # Linux (PortAudio とクリップボード用ツール)
     sudo apt install libportaudio2 xclip        # Wayland なら wl-clipboard
@@ -30,11 +32,12 @@ Ctrl+V (macOS は Cmd+V) で貼り付ける、完全ローカルのプロトタ�
 ■ 使い方
     python3 voice_input.py                          # SenseVoice
     python3 voice_input.py --model reazonspeech     # ReazonSpeech
+    python3 voice_input.py --highpass               # HPF を有効化
     python3 voice_input.py --denoise                # RNNoise を有効化
-    python3 voice_input.py --no-highpass            # HPF を無効化
     python3 voice_input.py --list-devices
     python3 voice_input.py --hotkey f9 --device 2
 
+    既定では録音バッファをそのまま推論へ渡す (前処理なし)。
     カレントディレクトリの replacements.json を自動で読み込む
     (存在しない場合は空のテンプレートを生成)。
     既定の録音キーは右 Alt (macOS は右 Option)。
@@ -110,8 +113,8 @@ CONFIG: dict[str, Any] = {
     "device": None,             # 入力デバイス番号 or 名前の一部
 
     # --- 音響前処理 ---
-    "highpass": True,           # 80Hz の 2 次バターワース HPF
-    "denoise": False,           # RNNoise (pyrnnoise が必要)
+    "highpass": False,          # 既定は無効 (精度・レイテンシ優先)
+    "denoise": False,           # 既定は無効 (pyrnnoise が必要)
 
     # --- 貼り付け / クリップボード ---
     "paste_delay_ms": 50,       # クリップボード設定後、貼り付けまでの待機
@@ -1312,15 +1315,25 @@ class VoiceInputApp:
             remove_tags=config["remove_tags"],
             remove_ja_spaces=config["remove_ja_spaces"],
         )
-        self._preprocessor = AudioPreprocessor(
-            self._sample_rate,
-            highpass=bool(config["highpass"]),
-            denoise=bool(config["denoise"]),
-        )
+        highpass = bool(config["highpass"])
+        denoise = bool(config["denoise"])
+        self._preprocessor: AudioPreprocessor | None = None
+        if highpass or denoise:
+            self._preprocessor = AudioPreprocessor(
+                self._sample_rate,
+                highpass=highpass,
+                denoise=denoise,
+            )
         logger.info(
             "ハイパス: %s / ノイズリダクション: %s",
-            "ON" if self._preprocessor.highpass_enabled else "OFF",
-            "ON" if self._preprocessor.denoise_enabled else "OFF",
+            "ON"
+            if self._preprocessor is not None
+            and self._preprocessor.highpass_enabled
+            else "OFF",
+            "ON"
+            if self._preprocessor is not None
+            and self._preprocessor.denoise_enabled
+            else "OFF",
         )
         logger.info("置換辞書: %d件読み込み", len(external_replacements))
 
@@ -1481,12 +1494,13 @@ class VoiceInputApp:
         if self._capture.xruns:
             logger.debug("PortAudio xruns: %d", self._capture.xruns)
 
-        preprocess_started = time.perf_counter()
-        audio = self._preprocessor.process(audio)
-        logger.debug(
-            "前処理時間: %.1f ms",
-            (time.perf_counter() - preprocess_started) * 1000.0,
-        )
+        if self._preprocessor is not None:
+            preprocess_started = time.perf_counter()
+            audio = self._preprocessor.process(audio)
+            logger.debug(
+                "前処理時間: %.1f ms",
+                (time.perf_counter() - preprocess_started) * 1000.0,
+            )
 
         peak = float(np.max(np.abs(audio)))
         if peak < 1e-4:
@@ -1588,7 +1602,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--highpass",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="80Hz の 2 次バターワースハイパスフィルタ (既定: ON)",
+        help="80Hz の 2 次バターワースハイパスフィルタ (既定: OFF)",
     )
     parser.add_argument(
         "--denoise",
