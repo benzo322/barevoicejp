@@ -265,6 +265,16 @@
   .guide-note{display:flex;align-items:center;gap:7px;margin-top:12px;padding-top:12px;border-top:1px solid rgba(148,163,184,.13);
     font-size:10.5px;line-height:1.6;color:#94a3b8}
   .guide-note svg{width:13px;height:13px;flex:none;color:#818cf8}
+  .tech-card{margin-top:14px;margin-bottom:2px}
+  .tech-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(248px,1fr));gap:9px}
+  .tech-item{padding:11px 13px;border-radius:13px;background:rgba(255,255,255,.58);
+    border:1px solid rgba(148,163,184,.14)}
+  .tech-label{font-size:9.5px;letter-spacing:.1em;font-weight:700;color:#94a3b8}
+  .tech-value{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:5px;
+    font-size:12px;font-weight:650;color:#1e293b;letter-spacing:-.01em}
+  .tech-value code{font-family:"Cascadia Code","Consolas",monospace;font-size:10px;font-weight:600;color:#4338ca;
+    padding:2px 6px;border-radius:6px;background:rgba(238,242,255,.85);border:1px solid rgba(99,102,241,.14)}
+  .tech-desc{margin-top:4px;font-size:10.5px;line-height:1.6;color:#7c8ba1}
   .footer{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:10px 6px 0;font-size:10.5px;color:#9aa8ba;flex:none}
   .footer .hint{display:flex;align-items:center;gap:6px}
   .footer svg{width:12px;height:12px}
@@ -563,6 +573,54 @@
         </div>
       </article>
     </div>
+
+    <article class="card tech-card">
+      <div class="card-head">
+        <div>
+          <div class="kicker" style="margin-bottom:6px">UNDER THE HOOD</div>
+          <h2>🛠 技術スタック（裏側の仕組み）</h2>
+          <p class="sub">軽さの代わりに、仕組みはすべて自前。この PC の外には何も出ません。</p>
+        </div>
+        <span class="badge green">100% LOCAL</span>
+      </div>
+      <div class="tech-grid">
+        <div class="tech-item">
+          <div class="tech-label">コア言語</div>
+          <div class="tech-value"><code>Rust</code></div>
+          <div class="tech-desc">単一ネイティブバイナリ / メモリ安全 / C-API FFI</div>
+        </div>
+        <div class="tech-item">
+          <div class="tech-label">音声推論</div>
+          <div class="tech-value"><code>sherpa-onnx</code><code>ONNX Runtime</code></div>
+          <div class="tech-desc">SenseVoice / ReazonSpeech / Whisper Turbo</div>
+        </div>
+        <div class="tech-item">
+          <div class="tech-label">オーディオ処理</div>
+          <div class="tech-value"><code>cpal</code><code>16kHz リサンプラー</code></div>
+          <div class="tech-desc">80Hz ハイパスフィルタ / 200ms プリロール</div>
+        </div>
+        <div class="tech-item">
+          <div class="tech-label">Windows API</div>
+          <div class="tech-value"><code>WH_KEYBOARD_LL</code><code>SendInput</code></div>
+          <div class="tech-desc">右Alt制御 / 直貼り / レイヤード非活性オーバーレイ</div>
+        </div>
+        <div class="tech-item">
+          <div class="tech-label">自然言語処理</div>
+          <div class="tech-value">助詞保護ロジック</div>
+          <div class="tech-desc">辞書完全一致置換 / 英日境界自動スペース / ホットリロード</div>
+        </div>
+        <div class="tech-item">
+          <div class="tech-label">UIレイヤー</div>
+          <div class="tech-value"><code>WebView2</code><code>wry / tao</code></div>
+          <div class="tech-desc">ゼロ依存・完全ローカルGUI</div>
+        </div>
+        <div class="tech-item">
+          <div class="tech-label">セキュリティ</div>
+          <div class="tech-value">通信機能なし</div>
+          <div class="tech-desc">完全ローカル完結・外部送信ゼロ</div>
+        </div>
+      </div>
+    </article>
   </section>
 
   <footer class="footer">
