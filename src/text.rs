@@ -2,7 +2,7 @@
 //!
 //! `voice_input.py` の `TextFormatter` / `load_words` /
 //! `load_external_replacements` を移植。タグ除去、空白正規化、
-//! words.txt のファジー置換、replacements.json の完全一致置換、
+//! replacements.json の完全一致置換、words.txt のファジー置換、
 //! 英日境界のスペース補正を同じ順序で適用する。
 
 use std::collections::HashSet;
@@ -55,6 +55,41 @@ fn is_ja_char(c: char) -> bool {
 
 fn is_ascii_alpha(c: char) -> bool {
     c.is_ascii_alphabetic()
+}
+
+/// ひらがな・カタカナ・長音。ファジー一致のコア判定に使う。
+fn kana_script(c: char) -> Option<u8> {
+    match c {
+        '\u{3041}'..='\u{3096}' => Some(1),
+        '\u{30a1}'..='\u{30fa}' | '\u{30fc}' | '\u{31f0}'..='\u{31ff}' => Some(2),
+        _ => None,
+    }
+}
+
+/// コアが仮名だけで構成され、外側と文字種が連続していないか。
+///
+/// 漢字や英字を巻き込んだ一致 (例: 「ドッカーで起」) や、
+/// 長いカタカナ語の途中だけに一致する (例: 「プロジェクト」の「ジェクト」)
+/// ことを防ぐ。
+fn is_fuzzy_core_boundary(text: &[char], start: usize, end: usize) -> bool {
+    if start >= end || !text[start..end].iter().all(|&c| kana_script(c).is_some()) {
+        return false;
+    }
+    let first_script = kana_script(text[start]);
+    let last_script = kana_script(text[end - 1]);
+    if start > 0 {
+        let left_script = kana_script(text[start - 1]);
+        if left_script.is_some() && left_script == first_script {
+            return false;
+        }
+    }
+    if end < text.len() {
+        let right_script = kana_script(text[end]);
+        if right_script.is_some() && right_script == last_script {
+            return false;
+        }
+    }
+    true
 }
 
 fn char_len(text: &str) -> usize {
@@ -236,8 +271,9 @@ pub fn load_words(path: &Path) -> Vec<WordEntry> {
 // ---------------------------------------------------------------------------
 /// 認識結果の整形器。
 ///
-/// タグ除去 → 空白正規化 → words.txt のファジー置換 →
-/// replacements.json の完全一致置換 → 英日境界補正、の順に適用する。
+/// タグ除去 → 空白正規化 → 完全一致置換 → ファジー置換 →
+/// 英日境界補正、の順に適用する。完全一致を先に適用することで、
+/// 登録済みの読みが別語のファジー一致に奪われない。
 pub struct TextFormatter {
     remove_tags: bool,
     remove_ja_spaces: bool,
@@ -282,9 +318,11 @@ impl TextFormatter {
                 Some(reading) => {
                     upsert(&mut exact, reading, &entry.target);
                     // 読みが短い語や API/PR/DB のような短い正式名は誤爆防止のため
-                    // ファジーマッチ対象外にする。
+                    // ファジーマッチ対象外にする。日本語の正式表記は表記揺れの
+                    // 必要がないため、ASCII の正式表記だけを対象にする。
                     if char_len(reading) >= FUZZY_MIN_CHARS
                         && char_len(&entry.target) >= FUZZY_MIN_CHARS
+                        && is_ascii_word(&entry.target)
                     {
                         fuzzy_entries.push(entry.clone());
                     }
@@ -327,10 +365,11 @@ impl TextFormatter {
         if self.remove_ja_spaces {
             text = remove_ja_spaces(&text);
         }
-        text = self.apply_fuzzy(&text);
+        // 完全一致を先に適用し、登録済みの読みがファジー一致に奪われないようにする。
         for (key, target) in &self.replacements {
             text = replace_all_with_boundaries(&text, key, target);
         }
+        text = self.apply_fuzzy(&text);
         text = normalize_ascii_japanese_boundaries(&text);
         text.trim().to_string()
     }
@@ -378,6 +417,9 @@ impl TextFormatter {
             if core_len < reading_len.saturating_sub(FUZZY_LENGTH_SLACK).max(1)
                 || core_len > reading_len + FUZZY_LENGTH_SLACK
             {
+                continue;
+            }
+            if !is_fuzzy_core_boundary(&text_chars, start, end) {
                 continue;
             }
 
