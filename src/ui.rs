@@ -9,11 +9,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tao::dpi::LogicalSize;
+use tao::dpi::{LogicalSize, PhysicalPosition};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tao::platform::windows::WindowExtWindows;
 use tao::window::{Window, WindowBuilder};
+use windows_sys::Win32::Foundation::RECT;
+use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETWORKAREA, SystemParametersInfoW};
 use wry::{WebView, WebViewBuilder};
 
 use crate::app::App;
@@ -74,6 +76,8 @@ pub fn run(mut app: App) -> ! {
             std::process::exit(1);
         }
     };
+
+    center_window(&window);
 
     let ipc_proxy = proxy.clone();
     let script: &'static str = include_str!("web/settings.js");
@@ -208,10 +212,27 @@ pub fn run(mut app: App) -> ! {
 }
 
 fn show_window(window: &Window) {
-    window.set_visible(true);
     window.set_minimized(false);
+    center_window(window);
+    window.set_visible(true);
     window.set_focus();
     win::force_foreground(window.hwnd() as *mut core::ffi::c_void);
+}
+
+/// プライマリディスプレイのワークエリア中央へ設定画面を移動する。
+fn center_window(window: &Window) {
+    let mut work: RECT = unsafe { std::mem::zeroed() };
+    // SAFETY: work は有効な出力先。SPI_GETWORKAREA はプライマリのワークエリアを返す。
+    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, (&raw mut work).cast(), 0) };
+    if ok == 0 {
+        return;
+    }
+    let size = window.outer_size();
+    let width = work.right - work.left;
+    let height = work.bottom - work.top;
+    let x = work.left + (width - size.width as i32) / 2;
+    let y = work.top + (height - size.height as i32) / 2;
+    window.set_outer_position(PhysicalPosition::new(x, y));
 }
 
 fn set_notice(notice: &mut Option<Notice>, id: &mut u64, kind: &'static str, message: &str) {
@@ -480,10 +501,19 @@ fn snapshot(app: &App, settings: &Settings, notice: &Option<Notice>) -> Value {
         })
         .collect::<Vec<_>>();
 
-    let devices = crate::audio::input_device_names()
+    let device_list = crate::audio::input_device_list();
+    let default_device = device_list.default_name;
+    let devices = device_list
+        .devices
         .into_iter()
         .enumerate()
-        .map(|(index, name)| json!({ "value": index.to_string(), "label": name }))
+        .map(|(index, device)| {
+            json!({
+                "value": index.to_string(),
+                "label": device.name,
+                "isDefault": device.is_default,
+            })
+        })
         .collect::<Vec<_>>();
 
     let words = shared
@@ -513,6 +543,7 @@ fn snapshot(app: &App, settings: &Settings, notice: &Option<Notice>) -> Value {
             "hotwords": config.hotwords_file().is_some(),
         },
         "models": model_list,
+        "defaultDevice": default_device,
         "devices": devices,
         "words": words,
         "level": level,

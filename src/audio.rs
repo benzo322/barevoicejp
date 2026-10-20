@@ -476,17 +476,52 @@ pub fn highpass(samples: &mut [f32], sample_rate: f64, cutoff_hz: f64) {
 // ---------------------------------------------------------------------------
 // デバイス一覧
 // ---------------------------------------------------------------------------
-/// 設定画面向けに入力デバイス名を列挙する。並び順がデバイス番号と一致する。
-pub fn input_device_names() -> Vec<String> {
+/// 設定画面へ渡す入力デバイス。
+pub struct InputDeviceInfo {
+    pub name: String,
+    pub is_default: bool,
+}
+
+/// 設定画面向けの入力デバイス一覧と、Windows の既定デバイス名。
+///
+/// `devices` の並び順は `select_device` の番号指定と一致する。
+pub struct InputDeviceList {
+    pub default_name: Option<String>,
+    pub devices: Vec<InputDeviceInfo>,
+}
+
+/// 入力デバイスと既定デバイス名を列挙する。
+pub fn input_device_list() -> InputDeviceList {
     let host = cpal::default_host();
-    match host.input_devices() {
+    let default_name = host
+        .default_input_device()
+        .and_then(|device| device.name().ok());
+    let mut default_marked = false;
+    let devices = match host.input_devices() {
         Ok(devices) => devices
-            .filter_map(|device| device.name().ok())
-            .collect::<Vec<_>>(),
+            .enumerate()
+            .map(|(index, device)| {
+                let name = device
+                    .name()
+                    .unwrap_or_else(|_| format!("入力デバイス {}", index + 1));
+                let is_default = !default_marked
+                    && default_name
+                        .as_deref()
+                        .is_some_and(|value| value == name.as_str());
+                if is_default {
+                    default_marked = true;
+                }
+                InputDeviceInfo { name, is_default }
+            })
+            .collect(),
         Err(exc) => {
             crate::warn!("入力デバイス一覧を取得できません: {exc}");
             Vec::new()
         }
+    };
+    InputDeviceList {
+        default_name,
+        devices,
     }
 }
 

@@ -190,16 +190,25 @@ function renderDevices() {
   if (!state) return;
   const select = $("#deviceSelect");
   const devices = state.devices || [];
+  const defaultDevice = state.defaultDevice || "";
   const current = state.settings.device == null ? "" : state.settings.device;
-  const signature = JSON.stringify(devices) + "|" + current;
+  const signature = JSON.stringify({ devices, defaultDevice }) + "|" + current;
   if (select.dataset.signature === signature) return;
   select.dataset.signature = signature;
-  let options = `<option value="">既定のマイク</option>`;
+  const defaultLabel = defaultDevice
+    ? `システムの既定 (現在: ${defaultDevice})`
+    : "システムの既定";
+  let options = `<option value="">${esc(defaultLabel)}</option>`;
   let found = false;
-  for (const device of devices) {
-    const selected = device.value === current;
-    if (selected) found = true;
-    options += `<option value="${esc(device.value)}" ${selected ? "selected" : ""}>${esc(device.label)}</option>`;
+  if (devices.length) {
+    options += `<optgroup label="特定のデバイスに固定">`;
+    for (const device of devices) {
+      const selected = device.value === current;
+      if (selected) found = true;
+      const label = device.label + (device.isDefault ? "（システム既定）" : "");
+      options += `<option value="${esc(device.value)}" ${selected ? "selected" : ""}>${esc(label)}</option>`;
+    }
+    options += `</optgroup>`;
   }
   if (current && !found) {
     options += `<option value="${esc(current)}" selected>現在の指定: ${esc(current)}</option>`;

@@ -21,8 +21,8 @@ pub enum Cue {
 /// テーマと種類ごとの長さ。
 pub fn duration(theme: SoundTheme, cue: Cue) -> f32 {
     match (theme, cue) {
-        (SoundTheme::Soft, Cue::Start) => 0.12,
-        (SoundTheme::Soft, Cue::Finish) => 0.55,
+        (SoundTheme::Soft, Cue::Start) => 0.45,
+        (SoundTheme::Soft, Cue::Finish) => 0.95,
         (SoundTheme::Pop, Cue::Start) => 0.14,
         (SoundTheme::Pop, Cue::Finish) => 0.22,
         (SoundTheme::Chime, Cue::Start) => 0.45,
@@ -35,6 +35,12 @@ pub fn duration(theme: SoundTheme, cue: Cue) -> f32 {
 fn smoothstep(value: f32) -> f32 {
     let value = value.clamp(0.0, 1.0);
     value * value * (3.0 - 2.0 * value)
+}
+
+/// ハン窓の前半分。両端で傾きが 0 になる、輪郭の立たないアタック。
+fn hann_attack(t: f32, seconds: f32) -> f32 {
+    let value = (t / seconds.max(0.001)).clamp(0.0, 1.0);
+    0.5 - 0.5 * (std::f32::consts::PI * value).cos()
 }
 
 fn progress(index: usize, count: usize) -> f32 {
@@ -67,23 +73,15 @@ pub fn synthesize(theme: SoundTheme, cue: Cue, sample_rate: u32, volume: f32) ->
         let sample = match theme {
             SoundTheme::Soft => match cue {
                 Cue::Start => {
-                    let frequency = 390.0 - 35.0 * p;
-                    phase += TAU * frequency / rate;
-                    let attack = smoothstep(t / 0.030);
-                    phase.sin()
-                        * attack
-                        * release(p, duration, 0.070)
-                        * (-1.6 * p).exp()
-                        * volume
-                        * 0.34
+                    // ピッチを動かさず、70ms のハン窓でふわっと立ち上げる。
+                    phase += TAU * 264.0 / rate;
+                    let attack = hann_attack(t, 0.070);
+                    phase.sin() * attack * release(p, duration, 0.22) * volume * 0.30
                 }
                 Cue::Finish => {
-                    phase += TAU * (440.0 - 2.0 * p) / rate;
-                    second += TAU * (554.365 - 2.0 * p) / rate;
-                    third += TAU * (659.255 - 3.0 * p) / rate;
-                    let attack = smoothstep(t / 0.025);
-                    let chord = phase.sin() * 0.55 + second.sin() * 0.27 + third.sin() * 0.18;
-                    chord * attack * release(p, duration, 0.50) * (-2.4 * p).exp() * volume * 0.34
+                    phase += TAU * 247.0 / rate;
+                    let attack = hann_attack(t, 0.075);
+                    phase.sin() * attack * release(p, duration, 0.62) * volume * 0.28
                 }
             },
             SoundTheme::Pop => match cue {
@@ -274,6 +272,30 @@ mod tests {
             "attack should ramp smoothly: 5ms={}, 30ms={}",
             at(5.0),
             at(30.0)
+        );
+        assert!((hann_attack(0.035, 0.070) - 0.5).abs() < 0.01);
+        assert!(hann_attack(0.069, 0.070) > 0.99);
+    }
+
+    #[test]
+    fn soft_finish_is_a_steady_low_tone() {
+        let rate = 44_100u32;
+        let samples = synthesize(SoundTheme::Soft, Cue::Finish, rate, 1.0);
+        let crossings = |start_ms: u32, end_ms: u32| {
+            let start = (rate * start_ms / 1000) as usize;
+            let end = (rate * end_ms / 1000) as usize;
+            samples[start..end]
+                .windows(2)
+                .filter(|pair| pair[0] <= 0.0 && pair[1] > 0.0)
+                .count()
+        };
+        let first = crossings(100, 200);
+        let second = crossings(200, 300);
+        assert!((22..=27).contains(&first), "first window={first}");
+        assert!((22..=27).contains(&second), "second window={second}");
+        assert!(
+            first.abs_diff(second) <= 1,
+            "pitch should not slide: {first} vs {second}"
         );
     }
 
