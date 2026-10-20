@@ -43,6 +43,16 @@ pub struct WordEntry {
     reading: Option<String>,
 }
 
+impl WordEntry {
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub fn reading(&self) -> Option<&str> {
+        self.reading.as_deref()
+    }
+}
+
 /// 日本語 (かな・漢字・々) かどうか。英日境界の空白補正に使う。
 fn is_ja_char(c: char) -> bool {
     matches!(c,
@@ -148,6 +158,87 @@ pub fn count_hotwords(path: &Path) -> usize {
         return 0;
     };
     text.lines().filter(|line| !line.trim().is_empty()).count()
+}
+
+/// words.txt の 1 行を `(正式表記, 読み)` として解釈する。
+fn parse_word_line(line: &str) -> Option<(String, Option<String>)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let (target, reading) = if let Some((target, reading)) = line.split_once(':') {
+        (target.trim(), Some(reading.trim().to_string()))
+    } else if let Some((target, reading)) = line.split_once('：') {
+        (target.trim(), Some(reading.trim().to_string()))
+    } else {
+        (line, None)
+    };
+    if target.is_empty() {
+        return None;
+    }
+    let reading = match reading {
+        Some(reading) if reading.is_empty() => return None,
+        Some(reading) => Some(reading),
+        None if is_ascii_word(target) => None,
+        None => Some(target.to_string()),
+    };
+    Some((target.to_string(), reading))
+}
+
+/// 設定画面から単語を 1 件追加する。
+pub fn add_word(path: &Path, target: &str, reading: &str) -> Result<(), String> {
+    let target = target.trim();
+    let reading = reading.trim();
+    if target.is_empty() || reading.is_empty() {
+        return Err("正式表記と読みの両方を入力してください".to_string());
+    }
+    if [target, reading]
+        .iter()
+        .any(|value| value.contains(['\n', '\r', ':', '：']))
+    {
+        return Err("正式表記・読みに改行やコロンは使えません".to_string());
+    }
+    let existing = read_utf8_bom(path).unwrap_or_default();
+    let key = (target.to_string(), Some(reading.to_string()));
+    if existing
+        .lines()
+        .filter_map(parse_word_line)
+        .any(|entry| entry == key)
+    {
+        return Err("同じ単語が既に登録されています".to_string());
+    }
+    let mut text = existing;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&format!("{target} : {reading}\n"));
+    fs::write(path, text).map_err(|exc| format!("words.txt を更新できません: {exc}"))
+}
+
+/// 設定画面から単語を 1 件削除する。コメントと他の行はそのまま残す。
+pub fn remove_word(path: &Path, target: &str, reading: Option<&str>) -> Result<usize, String> {
+    let Some(text) = read_utf8_bom(path) else {
+        return Ok(0);
+    };
+    let mut removed = 0usize;
+    let mut kept = String::with_capacity(text.len());
+    for line in text.lines() {
+        let matches = parse_word_line(line)
+            .map(|(entry_target, entry_reading)| {
+                entry_target == target && entry_reading.as_deref() == reading
+            })
+            .unwrap_or(false);
+        if matches {
+            removed += 1;
+        } else {
+            kept.push_str(line);
+            kept.push('\n');
+        }
+    }
+    if removed > 0 {
+        fs::write(path, kept).map_err(|exc| format!("words.txt を更新できません: {exc}"))?;
+    }
+    Ok(removed)
 }
 
 /// `replacements.json` を読み込む。存在しなければ空のテンプレートを生成する。
@@ -868,5 +959,38 @@ mod tests {
         for (input, expected) in cases {
             assert_eq!(f.format(input), expected, "input={input:?}");
         }
+    }
+
+    #[test]
+    fn inline_word_editing_roundtrips() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("時刻")
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("mkvoicejp-words-{}-{unique}", std::process::id()));
+        fs::create_dir_all(&dir).expect("一時ディレクトリ");
+        let path = dir.join("words.txt");
+        fs::write(&path, "# keep\nGitHub : ギットハブ\n").expect("初期辞書");
+
+        add_word(&path, "TypeScript", "たいぷすくりぷと").expect("追加");
+        assert!(add_word(&path, "TypeScript", "たいぷすくりぷと").is_err());
+        let entries = load_words(&path);
+        assert!(entries.iter().any(|entry| {
+            entry.target() == "TypeScript" && entry.reading() == Some("たいぷすくりぷと")
+        }));
+
+        assert_eq!(
+            remove_word(&path, "TypeScript", Some("たいぷすくりぷと")).expect("削除"),
+            1
+        );
+        let text = fs::read_to_string(&path).expect("辞書を読む");
+        assert!(text.contains("# keep"));
+        assert!(!text.contains("TypeScript"));
+        assert_eq!(
+            remove_word(&path, "TypeScript", Some("たいぷすくりぷと")).expect("再削除"),
+            0
+        );
+        fs::remove_dir_all(&dir).expect("一時ディレクトリを削除");
     }
 }

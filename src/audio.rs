@@ -4,7 +4,7 @@
 //! プリロール分だけ巻き戻して切り出す。デバイスが 16kHz を直接
 //! 受け付けない場合のみ、既定設定で開いて線形リサンプルする。
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -38,6 +38,12 @@ impl RingBuffer {
     /// これまでに書き込んだ総サンプル数。
     pub fn position(&self) -> u64 {
         self.total
+    }
+
+    /// 内容と累積位置をリセットする (マイク再起動時)。
+    pub fn clear(&mut self) {
+        self.buffer.fill(0.0);
+        self.total = 0;
     }
 
     /// 末尾にサンプルを追加する。容量を超えた分は古いものから捨てる。
@@ -153,14 +159,21 @@ impl LinearResampler {
 /// `cpal::Stream` は `Send` ではないため、この構造体はメインスレッドで保持する。
 /// ワーカーは [`AudioCapture::ring`] の `Arc` 経由でサンプルを読む。
 pub struct AudioCapture {
-    ring: Arc<Mutex<RingBuffer>>,
     xruns: Arc<AtomicU64>,
-    stream: cpal::Stream,
+    /// ストリームを生かしておくためだけに保持する。
+    _stream: cpal::Stream,
 }
 
 impl AudioCapture {
     /// 既定 (または `--device` 指定) の入力デバイスを開いて録音を開始する。
-    pub fn start(config: &Config) -> Result<Self, String> {
+    ///
+    /// `ring` と `level` は呼び出し側が用意する。設定画面からマイクを
+    /// 切り替えるときも同じバッファを再利用する。
+    pub fn start(
+        config: &Config,
+        ring: Arc<Mutex<RingBuffer>>,
+        level: Arc<AtomicU32>,
+    ) -> Result<Self, String> {
         let host = cpal::default_host();
         let device = select_device(&host, config.device.as_deref())?;
         let name = device.name().unwrap_or_else(|_| "?".to_string());
@@ -189,7 +202,15 @@ impl AudioCapture {
 
         let capacity =
             (config.sample_rate as f32 * config.ring_seconds).max(MIN_RING_SECONDS) as usize;
-        let ring = Arc::new(Mutex::new(RingBuffer::new(capacity)));
+        {
+            let mut buffer = ring.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if buffer.buffer.len() != capacity {
+                *buffer = RingBuffer::new(capacity);
+            } else {
+                buffer.clear();
+            }
+        }
+        level.store(0.0f32.to_bits(), Ordering::Relaxed);
         let xruns = Arc::new(AtomicU64::new(0));
 
         let spec = cpal::StreamConfig {
@@ -203,7 +224,15 @@ impl AudioCapture {
             input_rate,
             output_rate: config.sample_rate,
         };
-        let stream = match build_for_format(&device, &spec, sample_format, layout, &ring, &xruns) {
+        let stream = match build_for_format(
+            &device,
+            &spec,
+            sample_format,
+            layout,
+            &ring,
+            &level,
+            &xruns,
+        ) {
             Ok(stream) => stream,
             Err(exc) => {
                 crate::debug!(
@@ -214,8 +243,16 @@ impl AudioCapture {
                     buffer_size: cpal::BufferSize::Default,
                     ..spec
                 };
-                build_for_format(&device, &spec, sample_format, layout, &ring, &xruns).map_err(
-                    |exc| {
+                build_for_format(
+                    &device,
+                    &spec,
+                    sample_format,
+                    layout,
+                    &ring,
+                    &level,
+                    &xruns,
+                )
+                .map_err(|exc| {
                         format!(
                             "マイク入力ストリームを開始できません。\n\
                              \x20 16kHz / mono / float32 に対応したデバイスか確認してください。\n\
@@ -236,25 +273,14 @@ impl AudioCapture {
         );
 
         Ok(Self {
-            ring,
             xruns,
-            stream,
+            _stream: stream,
         })
-    }
-
-    /// 共有リングバッファ。ワーカースレッドへ渡す。
-    pub fn ring(&self) -> Arc<Mutex<RingBuffer>> {
-        Arc::clone(&self.ring)
     }
 
     /// ストリームエラー回数。デバッグログ用。
     pub fn xruns(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.xruns)
-    }
-
-    /// ストリームを停止する。
-    pub fn stop(self) {
-        drop(self.stream);
     }
 }
 
@@ -339,14 +365,15 @@ fn build_for_format(
     format: cpal::SampleFormat,
     layout: StreamLayout,
     ring: &Arc<Mutex<RingBuffer>>,
+    level: &Arc<AtomicU32>,
     xruns: &Arc<AtomicU64>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     match format {
-        cpal::SampleFormat::F32 => build_typed::<f32>(device, config, layout, ring, xruns),
-        cpal::SampleFormat::I16 => build_typed::<i16>(device, config, layout, ring, xruns),
-        cpal::SampleFormat::U16 => build_typed::<u16>(device, config, layout, ring, xruns),
-        cpal::SampleFormat::I32 => build_typed::<i32>(device, config, layout, ring, xruns),
-        cpal::SampleFormat::F64 => build_typed::<f64>(device, config, layout, ring, xruns),
+        cpal::SampleFormat::F32 => build_typed::<f32>(device, config, layout, ring, level, xruns),
+        cpal::SampleFormat::I16 => build_typed::<i16>(device, config, layout, ring, level, xruns),
+        cpal::SampleFormat::U16 => build_typed::<u16>(device, config, layout, ring, level, xruns),
+        cpal::SampleFormat::I32 => build_typed::<i32>(device, config, layout, ring, level, xruns),
+        cpal::SampleFormat::F64 => build_typed::<f64>(device, config, layout, ring, level, xruns),
         _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
     }
 }
@@ -357,6 +384,7 @@ fn build_typed<T>(
     config: &cpal::StreamConfig,
     layout: StreamLayout,
     ring: &Arc<Mutex<RingBuffer>>,
+    level: &Arc<AtomicU32>,
     xruns: &Arc<AtomicU64>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
@@ -364,12 +392,14 @@ where
     f32: cpal::FromSample<T>,
 {
     let ring = Arc::clone(ring);
+    let level = Arc::clone(level);
     let error_xruns = Arc::clone(xruns);
     let channels = layout.channels.max(1);
     let mut resampler = (layout.input_rate != layout.output_rate)
         .then(|| LinearResampler::new(layout.input_rate, layout.output_rate));
     let mut mono: Vec<f32> = Vec::with_capacity(AUDIO_SCRATCH_SAMPLES);
     let mut resampled: Vec<f32> = Vec::with_capacity(AUDIO_SCRATCH_SAMPLES);
+    let mut smoothed = 0.0f32;
 
     device.build_input_stream::<T, _, _>(
         config,
@@ -381,6 +411,16 @@ where
                 mono.push(<f32 as cpal::Sample>::from_sample(data[index]));
                 index += channels;
             }
+            let rms = if mono.is_empty() {
+                0.0
+            } else {
+                (mono.iter().map(|sample| sample * sample).sum::<f32>() / mono.len() as f32).sqrt()
+            };
+            // 立ち上がりは速く、減衰はゆっくり。メーターが自然に揺れる。
+            let coefficient = if rms > smoothed { 0.55 } else { 0.10 };
+            smoothed += (rms - smoothed) * coefficient;
+            level.store(smoothed.to_bits(), Ordering::Relaxed);
+
             let mut ring = ring.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             match &mut resampler {
                 Some(resampler) => {
@@ -433,6 +473,20 @@ pub fn highpass(samples: &mut [f32], sample_rate: f64, cutoff_hz: f64) {
 // ---------------------------------------------------------------------------
 // デバイス一覧
 // ---------------------------------------------------------------------------
+/// 設定画面向けに入力デバイス名を列挙する。並び順がデバイス番号と一致する。
+pub fn input_device_names() -> Vec<String> {
+    let host = cpal::default_host();
+    match host.input_devices() {
+        Ok(devices) => devices
+            .filter_map(|device| device.name().ok())
+            .collect::<Vec<_>>(),
+        Err(exc) => {
+            crate::warn!("入力デバイス一覧を取得できません: {exc}");
+            Vec::new()
+        }
+    }
+}
+
 /// 入力可能なデバイスを列挙して標準出力へ表示する。
 ///
 /// 戻り値はプロセス終了コード (1 台以上見つかれば 0)。

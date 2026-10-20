@@ -10,23 +10,27 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
-use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+use windows_sys::Win32::System::Console::GetConsoleWindow;
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     SetClipboardData,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
-use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+use windows_sys::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW,
+    RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_CONTROL, VK_ESCAPE,
-    VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL, VK_RETURN, VK_RMENU,
-    VK_RSHIFT, VK_SHIFT, VK_SPACE, VK_TAB, VK_V,
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, ReleaseCapture, SendInput,
+    VK_CONTROL, VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
+    VK_RETURN, VK_RMENU, VK_RSHIFT, VK_SHIFT, VK_SPACE, VK_TAB, VK_V,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, MSG, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT,
-    WM_SYSKEYDOWN, WM_SYSKEYUP,
+    BringWindowToTop, CallNextHookEx, HHOOK, HTCAPTION, HWND_NOTOPMOST, HWND_TOPMOST,
+    KBDLLHOOKSTRUCT, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW,
+    SetForegroundWindow, SetWindowPos, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx,
+    WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_NCLBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 
 use crate::config;
@@ -56,6 +60,130 @@ unsafe extern "system" {
 pub struct Hotkey {
     vk: u16,
     right_alt: bool,
+}
+
+/// NUL 終端の UTF-16 へ変換する。
+pub fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// 設定ウィンドウを最前面へ出し、フォーカスを移す。
+pub fn force_foreground(hwnd: *mut core::ffi::c_void) {
+    // SAFETY: hwnd は呼び出し元の有効なトップレベルウィンドウ。
+    unsafe {
+        ShowWindow(hwnd, SW_SHOW);
+        SetForegroundWindow(hwnd);
+        BringWindowToTop(hwnd);
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        SetWindowPos(
+            hwnd,
+            HWND_NOTOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// 枠なし設定ウィンドウをドラッグ移動する。
+pub fn begin_drag(hwnd: *mut core::ffi::c_void) {
+    // SAFETY: hwnd は呼び出し元の有効なトップレベルウィンドウ。
+    unsafe {
+        ReleaseCapture();
+        SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as usize, 0);
+    }
+}
+
+/// コンソールウィンドウを隠す (`--console` 指定時は呼ばない)。
+pub fn hide_console() {
+    // SAFETY: コンソールが無ければ NULL が返るだけ。
+    unsafe {
+        let console = GetConsoleWindow();
+        if !console.is_null() {
+            ShowWindow(console, SW_HIDE);
+        }
+    }
+}
+
+const AUTOSTART_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const AUTOSTART_VALUE: &str = "mkvoicejp";
+
+/// 自動起動がレジストリに登録されているか。
+pub fn autostart_enabled() -> bool {
+    let key = wide(AUTOSTART_KEY);
+    let name = wide(AUTOSTART_VALUE);
+    let mut hkey: HKEY = std::ptr::null_mut();
+    // SAFETY: 有効な NUL 終端文字列と出力先を渡す。
+    unsafe {
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            0,
+            KEY_QUERY_VALUE,
+            &mut hkey,
+        ) != 0
+        {
+            return false;
+        }
+        let mut data = [0u8; 1024];
+        let mut size = data.len() as u32;
+        let mut kind = 0u32;
+        let status = RegQueryValueExW(
+            hkey,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            data.as_mut_ptr(),
+            &mut size,
+        );
+        RegCloseKey(hkey);
+        status == 0 && kind == REG_SZ && size > 1
+    }
+}
+
+/// 自動起動を登録・解除する。
+pub fn set_autostart(enabled: bool) -> Result<(), String> {
+    let key = wide(AUTOSTART_KEY);
+    let name = wide(AUTOSTART_VALUE);
+    let mut hkey: HKEY = std::ptr::null_mut();
+    // SAFETY: 文字列は NUL 終端で、hkey は成功時のみ閉じる。
+    unsafe {
+        if RegOpenKeyExW(HKEY_CURRENT_USER, key.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) != 0 {
+            return Err("自動起動のレジストリキーを開けません".to_string());
+        }
+        let status = if enabled {
+            let exe = std::env::current_exe()
+                .map_err(|exc| format!("実行ファイルのパスを取得できません: {exc}"))?;
+            let command = format!("\"{}\"", exe.display());
+            let data = wide(&command);
+            RegSetValueExW(
+                hkey,
+                name.as_ptr(),
+                0,
+                REG_SZ,
+                data.as_ptr() as *const u8,
+                (data.len() * std::mem::size_of::<u16>()) as u32,
+            )
+        } else {
+            RegDeleteValueW(hkey, name.as_ptr())
+        };
+        RegCloseKey(hkey);
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(format!("自動起動の設定に失敗しました (code={status})"))
+        }
+    }
 }
 
 /// `alt_r` / `f9` / `ctrl_r` などのキー名を仮想キーコードへ変換する。
@@ -301,7 +429,14 @@ impl HookHandler {
 static HANDLER: OnceLock<HookHandler> = OnceLock::new();
 static ALT_DOWN: AtomicBool = AtomicBool::new(false);
 static KEY_DOWN: AtomicBool = AtomicBool::new(false);
-static MAIN_TID: AtomicU32 = AtomicU32::new(0);
+static HOTKEY_VK: AtomicU32 = AtomicU32::new(0);
+static HOTKEY_RIGHT_ALT: AtomicBool = AtomicBool::new(false);
+
+/// 設定画面からホットキーを差し替える。フックの再設置は不要。
+pub fn set_hotkey(hotkey: Hotkey) {
+    HOTKEY_VK.store(u32::from(hotkey.vk), Ordering::SeqCst);
+    HOTKEY_RIGHT_ALT.store(hotkey.right_alt, Ordering::SeqCst);
+}
 
 /// 設置したキーボードフック。ドロップ時に自動で解除する。
 pub struct HookGuard {
@@ -321,11 +456,11 @@ impl Drop for HookGuard {
 /// フックコールバックはこの関数を呼んだスレッドで実行されるため、
 /// 呼び出し後に [`run_message_loop`] を回す必要がある。
 pub fn install(handler: HookHandler) -> Result<HookGuard, String> {
+    set_hotkey(handler.hotkey);
     if HANDLER.set(handler).is_err() {
         return Err("キーボードフックは既に設定されています".to_string());
     }
     unsafe {
-        SetConsoleCtrlHandler(Some(ctrl_handler), 1);
         let module = GetModuleHandleW(std::ptr::null());
         let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), module, 0);
         if hook.is_null() {
@@ -336,30 +471,6 @@ pub fn install(handler: HookHandler) -> Result<HookGuard, String> {
         }
         Ok(HookGuard { hook })
     }
-}
-
-/// Ctrl+C を受けたら WM_QUIT を投げ、メッセージループを終了させる。
-pub fn run_message_loop() {
-    unsafe {
-        MAIN_TID.store(GetCurrentThreadId(), Ordering::SeqCst);
-        let mut message: MSG = std::mem::zeroed();
-        while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
-            TranslateMessage(&message);
-            DispatchMessageW(&message);
-        }
-    }
-}
-
-unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
-    unsafe {
-        let thread_id = MAIN_TID.load(Ordering::SeqCst);
-        if thread_id != 0 {
-            windows_sys::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
-                thread_id, WM_QUIT, 0, 0,
-            );
-        }
-    }
-    1
 }
 
 fn is_right_alt(vk: u16, flags: u32) -> bool {
@@ -383,9 +494,11 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: usize, lparam: isize) -> 
     let down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
     let up = message == WM_KEYUP || message == WM_SYSKEYUP;
     let vk = keyboard.vkCode as u16;
+    let hotkey_vk = HOTKEY_VK.load(Ordering::SeqCst) as u16;
+    let hotkey_right_alt = HOTKEY_RIGHT_ALT.load(Ordering::SeqCst);
 
     // 右 Alt: OS へ伝播させず、アプリの押下/離下処理だけを呼ぶ。
-    if handler.hotkey.right_alt && is_right_alt(vk, keyboard.flags) {
+    if hotkey_right_alt && is_right_alt(vk, keyboard.flags) {
         if down {
             if !ALT_DOWN.swap(true, Ordering::SeqCst) {
                 fire(&handler.on_press);
@@ -397,7 +510,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: usize, lparam: isize) -> 
     }
 
     // 右 Alt 以外のホットキーはそのまま OS にも通す。
-    if vk == handler.hotkey.vk {
+    if vk == hotkey_vk {
         if down {
             if !KEY_DOWN.swap(true, Ordering::SeqCst) {
                 fire(&handler.on_press);

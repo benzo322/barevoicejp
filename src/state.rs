@@ -19,6 +19,27 @@ pub enum AppState {
     Pasting,
 }
 
+/// フローティングバーが参照する表示状態。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum VisualState {
+    Idle = 0,
+    Recording = 1,
+    Processing = 2,
+    Pasting = 3,
+}
+
+impl VisualState {
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Recording,
+            2 => Self::Processing,
+            3 => Self::Pasting,
+            _ => Self::Idle,
+        }
+    }
+}
+
 /// ホットキー離下時の結果。
 #[derive(Debug)]
 pub enum ReleaseOutcome {

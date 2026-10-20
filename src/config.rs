@@ -3,7 +3,10 @@
 //! `voice_input.py` の `CONFIG` と `build_arg_parser` / `apply_cli_overrides` を
 //! そのまま Rust へ移植したもの。
 
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 // モデルディレクトリ名。`models/` 配下の展開先と一致させる。
 const SENSEVOICE_DIR_NAME: &str = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17";
@@ -11,6 +14,29 @@ const REAZONSPEECH_DIR_NAME: &str = "sherpa-onnx-zipformer-ja-reazonspeech-2024-
 const WHISPER_BASE_DIR_NAME: &str = "sherpa-onnx-whisper-base";
 const WHISPER_SMALL_DIR_NAME: &str = "sherpa-onnx-whisper-small";
 const WHISPER_TURBO_DIR_NAME: &str = "sherpa-onnx-whisper-large-v3-turbo";
+
+/// UI と CLI が受け付けるモデル ID。
+pub const MODEL_IDS: [&str; 5] = [
+    "sensevoice",
+    "reazonspeech",
+    "whisper-base",
+    "whisper-small",
+    "whisper-turbo",
+];
+
+/// モデル ID に対応する展開先ディレクトリ名。
+pub fn model_dir_name(model: &str) -> &'static str {
+    match model {
+        "reazonspeech" => REAZONSPEECH_DIR_NAME,
+        "whisper-base" => WHISPER_BASE_DIR_NAME,
+        "whisper-small" => WHISPER_SMALL_DIR_NAME,
+        "whisper-turbo" => WHISPER_TURBO_DIR_NAME,
+        _ => SENSEVOICE_DIR_NAME,
+    }
+}
+
+/// 設定ファイル名 (カレントディレクトリ基準)。
+pub const CONFIG_PATH: &str = "config.toml";
 
 // ---------------------------------------------------------------------------
 // 内部チューニング定数
@@ -53,30 +79,84 @@ pub const MS_PER_SECOND: u64 = 1_000;
 /// 浮動小数で扱うミリ秒換算。
 pub const MS_PER_SECOND_F64: f64 = MS_PER_SECOND as f64;
 
-/// 既定のモデルディレクトリを探す。
+/// `models/` のルートを探す。
 ///
 /// リファレンスはスクリプトと同じディレクトリの `models/` を使う。
 /// Rust 版はビルド時のマニフェスト位置 → exe の隣 → カレントディレクトリの順に
-/// 実在するものを採用する。
-fn default_model_dir(name: &str) -> PathBuf {
+/// 実在するものを採用する。どこにも無ければマニフェスト位置 (開発時) か
+/// カレントディレクトリを使う。
+pub fn models_root() -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::with_capacity(3);
     if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
-        candidates.push(PathBuf::from(manifest).join("models").join(name));
+        candidates.push(PathBuf::from(manifest).join("models"));
     }
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        candidates.push(dir.join("models").join(name));
+        candidates.push(dir.join("models"));
     }
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("models").join(name));
+        candidates.push(cwd.join("models"));
     }
-    candidates
-        .iter()
-        .find(|path| path.exists())
-        .cloned()
-        .or_else(|| candidates.into_iter().next())
-        .unwrap_or_else(|| PathBuf::from("models").join(name))
+    if let Some(found) = candidates.iter().find(|path| path.exists()) {
+        return found.clone();
+    }
+    // どこにも無ければ exe の隣に作る。自動起動時もカレントディレクトリに
+    // 依存せず、モデル・辞書・設定を同じ場所へ置ける。
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        return dir.join("models");
+    }
+    PathBuf::from("models")
+}
+
+/// データルート (models/ の親) をカレントディレクトリにする。
+///
+/// Windows の自動起動ではカレントディレクトリが System32 などになるため、
+/// `config.toml` / `words.txt` / `models/` を exe の隣で一貫して扱う。
+pub fn use_data_root() {
+    let Some(root) = models_root().parent().map(Path::to_path_buf) else {
+        return;
+    };
+    if root.is_dir()
+        && let Err(exc) = std::env::set_current_dir(&root)
+    {
+        crate::warn!(
+            "データディレクトリへ移動できません ({}): {exc}",
+            root.display()
+        );
+    }
+}
+
+/// 既定のモデルディレクトリを探す。
+fn default_model_dir(name: &str) -> PathBuf {
+    models_root().join(name)
+}
+
+/// ホットキーの押し方。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputMode {
+    /// 押している間だけ録音する。
+    PushToTalk,
+    /// 1 回押すと録音開始、もう 1 回で停止する。
+    Toggle,
+}
+
+impl InputMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PushToTalk => "push_to_talk",
+            Self::Toggle => "toggle",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "toggle" | "two_press" | "2press" => Self::Toggle,
+            _ => Self::PushToTalk,
+        }
+    }
 }
 
 /// 実行時の全設定。
@@ -103,6 +183,8 @@ pub struct Config {
     // --- 録音 / ホットキー ---
     /// 押している間だけ録音するキー名 (`alt_r`, `f9`, `ctrl_r` など)。
     pub hotkey: String,
+    /// 押し方 (PTT / 2 回押しトグル)。
+    pub input_mode: InputMode,
     pub paste_modifier: String,
     pub paste_key: String,
     pub sample_rate: u32,
@@ -117,6 +199,13 @@ pub struct Config {
     pub repeat_guard_ms: u32,
     pub ring_seconds: f32,
     pub device: Option<String>,
+
+    // --- UI / 通知音 ---
+    pub autostart: bool,
+    pub sound_start: bool,
+    pub sound_finish: bool,
+    pub sound_volume: f32,
+    pub floating_bar: bool,
 
     // --- 音響前処理 ---
     pub highpass: bool,
@@ -156,6 +245,7 @@ impl Default for Config {
             hotwords_score: 2.0,
 
             hotkey: "alt_r".to_string(),
+            input_mode: InputMode::PushToTalk,
             paste_modifier: "ctrl".to_string(),
             paste_key: "v".to_string(),
             sample_rate: 16_000,
@@ -166,6 +256,12 @@ impl Default for Config {
             repeat_guard_ms: 250,
             ring_seconds: 60.0,
             device: None,
+
+            autostart: false,
+            sound_start: true,
+            sound_finish: true,
+            sound_volume: 0.55,
+            floating_bar: true,
 
             highpass: false,
             denoise: false,
@@ -213,12 +309,119 @@ impl Config {
         if let Some(dir) = &self.model_dir_override {
             return dir.clone();
         }
+        self.default_model_dir_for(model)
+    }
+
+    /// `--model-dir` を無視した、モデル管理用の既定ディレクトリ。
+    pub fn default_model_dir_for(&self, model: &str) -> PathBuf {
         match model {
             "reazonspeech" => self.reazonspeech_model_dir.clone(),
             "whisper-base" => self.whisper_base_model_dir.clone(),
             "whisper-small" => self.whisper_small_model_dir.clone(),
             "whisper-turbo" => self.whisper_turbo_model_dir.clone(),
             _ => self.sensevoice_model_dir.clone(),
+        }
+    }
+}
+
+/// `config.toml` に保存する UI 設定。
+///
+/// 起動時はこの構造体を [`Config`] に反映し、CLI が指定された項目だけを
+/// さらに上書きする。設定画面での変更は即座に保存・反映される。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub model: String,
+    pub hotkey: String,
+    pub input_mode: String,
+    pub autostart: bool,
+    pub device: Option<String>,
+    pub language: String,
+    pub num_threads: i32,
+    pub sound_start: bool,
+    pub sound_finish: bool,
+    pub sound_volume: f32,
+    pub floating_bar: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        let config = Config::default();
+        Self::from_config(&config)
+    }
+}
+
+impl Settings {
+    /// `config.toml` を読む。戻り値の bool はファイルが存在したか。
+    pub fn load(path: &Path) -> (Self, bool) {
+        match fs::read_to_string(path) {
+            Ok(text) => match toml::from_str(&text) {
+                Ok(settings) => (settings, true),
+                Err(exc) => {
+                    crate::warn!(
+                        "設定ファイルを解釈できません ({}): {exc}。既定値で起動します。",
+                        path.display()
+                    );
+                    (Self::default(), true)
+                }
+            },
+            Err(exc) if exc.kind() == std::io::ErrorKind::NotFound => (Self::default(), false),
+            Err(exc) => {
+                crate::warn!(
+                    "設定ファイルを読み込めません ({}): {exc}。既定値で起動します。",
+                    path.display()
+                );
+                (Self::default(), false)
+            }
+        }
+    }
+
+    /// 設定を TOML として保存する。
+    pub fn save(&self, path: &Path) -> Result<(), String> {
+        let text = toml::to_string_pretty(self)
+            .map_err(|exc| format!("設定を TOML に変換できません: {exc}"))?;
+        fs::write(path, text)
+            .map_err(|exc| format!("設定を保存できません ({}): {exc}", path.display()))
+    }
+
+    /// UI 設定を実行時 [`Config`] へ反映する。
+    pub fn apply_to(&self, config: &mut Config) {
+        if MODEL_IDS.contains(&self.model.as_str()) {
+            config.model.clone_from(&self.model);
+        }
+        if !self.hotkey.trim().is_empty() {
+            config.hotkey = self.hotkey.trim().to_string();
+        }
+        config.input_mode = InputMode::parse(&self.input_mode);
+        config.autostart = self.autostart;
+        config.device = self.device.clone().filter(|value| !value.trim().is_empty());
+        if matches!(
+            self.language.as_str(),
+            "auto" | "ja" | "en" | "zh" | "ko" | "yue"
+        ) {
+            config.language.clone_from(&self.language);
+        }
+        config.num_threads = self.num_threads.clamp(1, 16);
+        config.sound_start = self.sound_start;
+        config.sound_finish = self.sound_finish;
+        config.sound_volume = self.sound_volume.clamp(0.0, 1.0);
+        config.floating_bar = self.floating_bar;
+    }
+
+    /// 実行時 [`Config`] から保存用の設定を作る。
+    pub fn from_config(config: &Config) -> Self {
+        Self {
+            model: config.model.clone(),
+            hotkey: config.hotkey.clone(),
+            input_mode: config.input_mode.as_str().to_string(),
+            autostart: config.autostart,
+            device: config.device.clone(),
+            language: config.language.clone(),
+            num_threads: config.num_threads,
+            sound_start: config.sound_start,
+            sound_finish: config.sound_finish,
+            sound_volume: config.sound_volume,
+            floating_bar: config.floating_bar,
         }
     }
 }
@@ -254,6 +457,8 @@ pub struct Cli {
     pub sweep: bool,
     /// デバッグログを有効にする。
     pub debug: bool,
+    /// コンソールウィンドウを表示したままにする。
+    pub console: bool,
     /// ヘルプを表示して終了する。
     pub help: bool,
 }
@@ -291,7 +496,22 @@ SenseVoice / ReazonSpeech / Whisper を使う Push-to-Talk 音声入力 (Windows
                              音声キャプチャと ASR は初期化しない
   --sweep                    --eval 時にファジーしきい値 70/75/80/85 を比較
   --debug                    デバッグログを表示
+  --console                  コンソールを表示したまま起動 (既定: 非表示)
 ";
+
+impl Cli {
+    /// データルートへ移動する前に、相対パス引数を絶対パスへ直す。
+    pub fn resolve_paths(&mut self) {
+        self.eval = self
+            .eval
+            .take()
+            .map(|path| path.canonicalize().unwrap_or(path));
+        self.model_dir = self
+            .model_dir
+            .take()
+            .map(|path| path.canonicalize().unwrap_or(path));
+    }
+}
 
 /// コマンドライン引数 (プログラム名を除く) を解析する。
 ///
@@ -316,14 +536,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String
             "-h" | "--help" => cli.help = true,
             "--model" => {
                 let value = take_value("--model")?;
-                const MODELS: [&str; 5] = [
-                    "sensevoice",
-                    "reazonspeech",
-                    "whisper-base",
-                    "whisper-small",
-                    "whisper-turbo",
-                ];
-                if !MODELS.contains(&value.as_str()) {
+                if !MODEL_IDS.contains(&value.as_str()) {
                     return Err(format!(
                         "--model は sensevoice / reazonspeech / whisper-base / \
                          whisper-small / whisper-turbo のいずれかです: {value}"
@@ -401,6 +614,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String
             "--eval" => cli.eval = Some(PathBuf::from(take_value("--eval")?)),
             "--sweep" => cli.sweep = true,
             "--debug" => cli.debug = true,
+            "--console" => cli.console = true,
             other => {
                 if other.starts_with('-') {
                     return Err(format!("不明なオプションです: {other}\n\n{HELP}"));
@@ -495,12 +709,30 @@ mod tests {
         }
     }
 
-    fn model_dir_name(model: &str) -> &'static str {
-        match model {
-            "whisper-base" => WHISPER_BASE_DIR_NAME,
-            "whisper-small" => WHISPER_SMALL_DIR_NAME,
-            "whisper-turbo" => WHISPER_TURBO_DIR_NAME,
-            _ => "",
-        }
+    #[test]
+    fn settings_roundtrip_and_clamp() {
+        let mut config = Config::default();
+        let mut settings = Settings::from_config(&config);
+        settings.model = "whisper-small".to_string();
+        settings.input_mode = "toggle".to_string();
+        settings.sound_volume = 2.0;
+        settings.num_threads = 99;
+        settings.apply_to(&mut config);
+        assert_eq!(config.model, "whisper-small");
+        assert_eq!(config.input_mode, InputMode::Toggle);
+        assert!((config.sound_volume - 1.0).abs() < f32::EPSILON);
+        assert_eq!(config.num_threads, 16);
+
+        let text = toml::to_string_pretty(&settings).expect("TOML へ変換");
+        let parsed: Settings = toml::from_str(&text).expect("TOML から復元");
+        assert_eq!(parsed, settings);
+    }
+
+    #[test]
+    fn settings_defaults_fill_missing_keys() {
+        let settings: Settings = toml::from_str("hotkey = \"f9\"\n").expect("部分的な設定");
+        assert_eq!(settings.hotkey, "f9");
+        assert_eq!(settings.model, "sensevoice");
+        assert!(settings.floating_bar);
     }
 }

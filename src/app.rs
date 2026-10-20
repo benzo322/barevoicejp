@@ -4,19 +4,19 @@
 //! 推論と貼り付けは 1 本のワーカースレッドで直列化する。
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::audio::RingBuffer;
-use crate::config::{self, Config};
+use crate::audio::{AudioCapture, RingBuffer};
+use crate::config::{self, Config, InputMode};
 use crate::engine::Engine;
-use crate::state::{AppState, ReleaseOutcome, StateMachine};
+use crate::state::{AppState, ReleaseOutcome, StateMachine, VisualState};
 use crate::text::{self, TextFormatter, WordEntry};
 use crate::win;
-use crate::{debug, error, info, warn};
+use crate::{debug, error, info, sound, warn};
 
 /// Mutex のポイズニングを無視して中身を取得する (録音は止めない)。
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -36,8 +36,8 @@ struct Utterance {
 enum Job {
     /// 推論と貼り付けを行う。
     Utterance(Utterance),
-    /// hotwords.txt の変更を反映してエンジンを再初期化する。
-    ReloadHotwords,
+    /// 設定変更を反映してエンジンを再初期化する。
+    Reconfigure,
     /// ワーカーを終了する。
     Shutdown,
 }
@@ -70,8 +70,8 @@ impl FileMtimes {
 /// フックコールバックとワーカーが共有する状態。
 ///
 /// `Mutex` はどれも短時間だけ保持し、推論中にキー入力を止めない。
-struct Shared {
-    config: Config,
+pub(crate) struct Shared {
+    config: Mutex<Config>,
     state: Mutex<StateMachine>,
     formatter: Mutex<TextFormatter>,
     dicts: Mutex<Dicts>,
@@ -80,25 +80,22 @@ struct Shared {
     xruns: Arc<AtomicU64>,
     tx: Sender<Job>,
     hotwords_supported: AtomicBool,
-    sample_rate: u32,
-    pre_roll_samples: u64,
-    tail_samples: u64,
-    min_duration: Duration,
-    repeat_guard: Duration,
-    paste_delay: Duration,
-    restore_delay: Duration,
-    restore_clipboard: bool,
-    highpass: bool,
+    engine_ready: AtomicBool,
+    engine_building: AtomicBool,
+    engine_error: Mutex<Option<String>>,
+    visual: Arc<AtomicU8>,
 }
 
 impl Shared {
-    /// 辞書を読み込み、時間・サンプル単位の値を事前計算する。
+    /// 辞書を読み込み、共有状態を初期化する。
     fn new(
         config: Config,
         ring: Arc<Mutex<RingBuffer>>,
         xruns: Arc<AtomicU64>,
         tx: Sender<Job>,
         hotwords_supported: bool,
+        engine_ready: bool,
+        engine_error: Option<String>,
     ) -> Arc<Self> {
         text::ensure_hotwords_file(Path::new(text::HOTWORDS_PATH));
         text::ensure_words_file(Path::new(text::WORDS_PATH));
@@ -129,17 +126,8 @@ impl Shared {
         };
         info!("ホットワード: {hotword_status} / ホットリロード: 有効");
 
-        let sample_rate = config.sample_rate;
-        let pre_roll_samples =
-            (sample_rate as u64 * config.pre_roll_ms as u64) / config::MS_PER_SECOND;
-        let tail_samples =
-            (sample_rate as u64 * config.tail_grace_ms as u64) / config::MS_PER_SECOND;
-        let min_duration = Duration::from_millis(config.min_duration_ms as u64);
-        let repeat_guard = Duration::from_millis(config.repeat_guard_ms as u64);
-        let paste_delay = Duration::from_millis(config.paste_delay_ms as u64);
-        let restore_delay = Duration::from_millis(config.clipboard_restore_delay_ms as u64);
-
         Arc::new(Self {
+            config: Mutex::new(config),
             state: Mutex::new(StateMachine::new()),
             formatter: Mutex::new(formatter),
             dicts: Mutex::new(Dicts { words, external }),
@@ -148,58 +136,171 @@ impl Shared {
             xruns,
             tx,
             hotwords_supported: AtomicBool::new(hotwords_supported),
-            sample_rate,
-            pre_roll_samples,
-            tail_samples,
-            min_duration,
-            repeat_guard,
-            paste_delay,
-            restore_delay,
-            restore_clipboard: config.restore_clipboard,
-            highpass: config.highpass,
-            config,
+            engine_ready: AtomicBool::new(engine_ready),
+            engine_building: AtomicBool::new(false),
+            engine_error: Mutex::new(engine_error),
+            visual: Arc::new(AtomicU8::new(VisualState::Idle as u8)),
         })
     }
 
-    fn on_press(&self) {
+    pub(crate) fn snapshot(&self) -> Config {
+        lock(&self.config).clone()
+    }
+
+    fn set_visual(&self, state: VisualState) {
+        self.visual.store(state as u8, Ordering::SeqCst);
+    }
+
+    /// 設定画面からの変更を反映する。推論設定が変わった場合だけ
+    /// ワーカーへエンジン再初期化を指示する。
+    fn update_config(&self, config: Config) {
+        let rebuild_engine = {
+            let current = lock(&self.config);
+            current.model != config.model
+                || current.language != config.language
+                || current.num_threads != config.num_threads
+                || current.provider != config.provider
+                || current.hotwords_score != config.hotwords_score
+                || current.model_dir_override != config.model_dir_override
+        };
+        *lock(&self.config) = config;
+        self.rebuild_formatter();
+        if rebuild_engine {
+            self.engine_ready.store(false, Ordering::SeqCst);
+            let _ = self.tx.send(Job::Reconfigure);
+        }
+    }
+
+    /// 辞書ファイルを即座に再読み込みする (設定画面の編集・トレイメニュー)。
+    fn reload_dictionaries(&self) {
+        let external = text::load_external_replacements(Path::new(text::REPLACEMENTS_PATH));
+        let words = text::load_words(Path::new(text::WORDS_PATH));
         {
-            let state = lock(&self.state);
-            if state.state() == AppState::Recording {
-                return;
+            let mut dicts = lock(&self.dicts);
+            dicts.external = external;
+            dicts.words = words;
+        }
+        *lock(&self.mtimes) = FileMtimes::read();
+        self.rebuild_formatter();
+        info!("辞書を再読み込みしました");
+    }
+
+    fn set_engine_result(&self, result: Result<Engine, String>) -> Option<Engine> {
+        self.engine_building.store(false, Ordering::SeqCst);
+        match result {
+            Ok(engine) => {
+                self.hotwords_supported
+                    .store(engine.supports_hotwords(), Ordering::SeqCst);
+                self.engine_ready.store(true, Ordering::SeqCst);
+                *lock(&self.engine_error) = None;
+                info!("推論エンジンを初期化しました");
+                Some(engine)
+            }
+            Err(exc) => {
+                self.engine_ready.store(false, Ordering::SeqCst);
+                warn!("推論エンジンを初期化できません: {exc}");
+                *lock(&self.engine_error) = Some(exc);
+                None
             }
         }
+    }
+
+    pub(crate) fn engine_status(&self) -> (bool, bool, Option<String>) {
+        (
+            self.engine_ready.load(Ordering::SeqCst),
+            self.engine_building.load(Ordering::SeqCst),
+            lock(&self.engine_error).clone(),
+        )
+    }
+
+    pub(crate) fn visual_state(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.visual)
+    }
+
+    pub(crate) fn word_entries(&self) -> Vec<(String, Option<String>)> {
+        lock(&self.dicts)
+            .words
+            .iter()
+            .map(|entry| {
+                (
+                    entry.target().to_string(),
+                    entry.reading().map(ToString::to_string),
+                )
+            })
+            .collect()
+    }
+
+    fn settle_visual(&self) {
+        let state = lock(&self.state).state();
+        self.set_visual(match state {
+            AppState::Recording => VisualState::Recording,
+            AppState::Processing => VisualState::Processing,
+            AppState::Pasting => VisualState::Pasting,
+            AppState::Idle => VisualState::Idle,
+        });
+    }
+
+    fn on_press(&self) {
         // 録音開始前に設定・辞書の変更を確認する。
         self.reload_if_changed();
 
+        let config = self.snapshot();
+        let recording = lock(&self.state).state() == AppState::Recording;
+        if config.input_mode == InputMode::Toggle && recording {
+            self.stop_recording(Instant::now());
+            return;
+        }
+        if recording {
+            return;
+        }
+
         let now = Instant::now();
         let position = lock(&self.ring).position();
-        let start_sample = position.saturating_sub(self.pre_roll_samples);
-        let started = lock(&self.state).begin_recording(now, self.repeat_guard, start_sample);
+        let pre_roll_samples =
+            (config.sample_rate as u64 * config.pre_roll_ms as u64) / config::MS_PER_SECOND;
+        let start_sample = position.saturating_sub(pre_roll_samples);
+        let repeat_guard = Duration::from_millis(config.repeat_guard_ms as u64);
+        let started = lock(&self.state).begin_recording(now, repeat_guard, start_sample);
         if started {
             info!("● 録音開始");
+            self.set_visual(VisualState::Recording);
+            if config.sound_start {
+                sound::play(sound::Cue::Start, config.sound_volume);
+            }
         } else {
             debug!("キーリピート/直後の再押下を無視");
         }
     }
 
     fn on_release(&self) {
-        let now = Instant::now();
+        if self.snapshot().input_mode == InputMode::Toggle {
+            return;
+        }
+        self.stop_recording(Instant::now());
+    }
+
+    fn stop_recording(&self, now: Instant) {
+        let config = self.snapshot();
         let position = lock(&self.ring).position();
-        let outcome =
-            lock(&self.state).release(now, self.tail_samples, position, self.min_duration);
+        let tail_samples =
+            (config.sample_rate as u64 * config.tail_grace_ms as u64) / config::MS_PER_SECOND;
+        let min_duration = Duration::from_millis(config.min_duration_ms as u64);
+        let outcome = lock(&self.state).release(now, tail_samples, position, min_duration);
         match outcome {
             ReleaseOutcome::Ignored => {}
             ReleaseOutcome::Cancelled(duration) => {
+                self.set_visual(VisualState::Idle);
                 info!(
                     "× 破棄: Esc によるキャンセル ({:.2} 秒)",
                     duration.as_secs_f64()
                 );
             }
             ReleaseOutcome::TooShort(duration) => {
+                self.set_visual(VisualState::Idle);
                 info!(
                     "× 破棄: 録音が短すぎます ({:.0} ms < {} ms)",
                     duration.as_secs_f64() * config::MS_PER_SECOND_F64,
-                    self.config.min_duration_ms
+                    config.min_duration_ms
                 );
             }
             ReleaseOutcome::Captured {
@@ -207,6 +308,7 @@ impl Shared {
                 end_sample,
                 duration,
             } => {
+                self.set_visual(VisualState::Processing);
                 info!("■ 録音終了: {:.2} 秒", duration.as_secs_f64());
                 let job = Job::Utterance(Utterance {
                     start_sample,
@@ -216,6 +318,7 @@ impl Shared {
                 if self.tx.send(job).is_err() {
                     warn!("推論ワーカーが停止しています");
                     lock(&self.state).abort();
+                    self.set_visual(VisualState::Idle);
                 }
             }
         }
@@ -223,7 +326,16 @@ impl Shared {
 
     fn on_cancel(&self) {
         if lock(&self.state).cancel() {
+            self.set_visual(VisualState::Idle);
             info!("× キャンセル (Esc)");
+        }
+    }
+
+    fn request_reconfigure(&self) {
+        self.engine_ready.store(false, Ordering::SeqCst);
+        self.engine_building.store(true, Ordering::SeqCst);
+        if self.tx.send(Job::Reconfigure).is_err() {
+            self.engine_building.store(false, Ordering::SeqCst);
         }
     }
 
@@ -259,9 +371,7 @@ impl Shared {
             mtimes.hotwords = text::file_mtime_ns(Path::new(text::HOTWORDS_PATH));
             let count = text::count_hotwords(Path::new(text::HOTWORDS_PATH));
             info!("ホットリロード: ホットワードを再読み込み ({}単語)", count);
-            if self.hotwords_supported.load(Ordering::Relaxed) {
-                let _ = self.tx.send(Job::ReloadHotwords);
-            }
+            self.request_reconfigure();
         }
     }
 
@@ -270,7 +380,8 @@ impl Shared {
             let dicts = lock(&self.dicts);
             (dicts.external.clone(), dicts.words.clone())
         };
-        let formatter = build_formatter(&self.config, &external, &words);
+        let config = self.snapshot();
+        let formatter = build_formatter(&config, &external, &words);
         *lock(&self.formatter) = formatter;
     }
 }
@@ -298,51 +409,122 @@ fn build_formatter(
 
 /// Push-to-Talk アプリ本体。
 ///
-/// 生成時にワーカースレッドを起動し、`run()` でキーボードフックの
-/// メッセージループへ入る。
+/// 生成時にワーカースレッドを起動し、`run()` で設定画面とトレイを含む
+/// イベントループへ入る。
 pub struct App {
     shared: Arc<Shared>,
-    worker: JoinHandle<()>,
+    worker: Option<JoinHandle<()>>,
+    ring: Arc<Mutex<RingBuffer>>,
+    level: Arc<AtomicU32>,
+    capture: Option<AudioCapture>,
+    capture_error: Option<String>,
 }
 
 impl App {
     /// ワーカーを起動する。`engine` の所有権はワーカーへ移る。
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
-        engine: Engine,
+        engine: Option<Engine>,
+        engine_error: Option<String>,
         ring: Arc<Mutex<RingBuffer>>,
+        level: Arc<AtomicU32>,
         xruns: Arc<AtomicU64>,
+        capture: Option<AudioCapture>,
+        capture_error: Option<String>,
         hotwords_supported: bool,
     ) -> Result<Self, String> {
         let (tx, rx) = channel();
-        let shared = Shared::new(config, ring, xruns, tx, hotwords_supported);
+        let engine_ready = engine.is_some();
+        let shared = Shared::new(
+            config,
+            Arc::clone(&ring),
+            xruns,
+            tx,
+            hotwords_supported,
+            engine_ready,
+            engine_error,
+        );
         let worker_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()
             .name("voice-input-worker".to_string())
             .spawn(move || worker_loop(worker_shared, engine, rx))
             .map_err(|exc| format!("推論ワーカーを開始できません: {exc}"))?;
-        Ok(Self { shared, worker })
+        Ok(Self {
+            shared,
+            worker: Some(worker),
+            ring,
+            level,
+            capture,
+            capture_error,
+        })
     }
 
-    /// キーボードフックを設置してメッセージループを回す。
-    ///
-    /// Ctrl+C でループを抜け、ワーカーを停止して終了コードを返す。
-    pub fn run(self) -> i32 {
-        let Self { shared, worker } = self;
+    pub fn shared(&self) -> &Arc<Shared> {
+        &self.shared
+    }
 
-        let hotkey = match win::parse_hotkey(&shared.config.hotkey) {
+    pub fn level(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.level)
+    }
+
+    pub fn capture_error(&self) -> Option<String> {
+        self.capture_error.clone()
+    }
+
+    /// マイクを開き直す。既存のリングバッファとレベルは再利用する。
+    pub fn restart_capture(&mut self, config: &Config) -> Result<(), String> {
+        self.capture = None;
+        match AudioCapture::start(config, Arc::clone(&self.ring), Arc::clone(&self.level)) {
+            Ok(capture) => {
+                self.capture = Some(capture);
+                self.capture_error = None;
+                Ok(())
+            }
+            Err(exc) => {
+                self.capture_error = Some(exc.clone());
+                Err(exc)
+            }
+        }
+    }
+
+    pub fn apply_config(&self, config: Config) {
+        self.shared.update_config(config);
+    }
+
+    pub fn reconfigure(&self) {
+        self.shared.request_reconfigure();
+    }
+
+    pub fn reload_dictionaries(&self) {
+        self.shared.reload_dictionaries();
+    }
+
+    /// ワーカーとマイクを停止する。UI 終了時に一度だけ呼ぶ。
+    pub fn shutdown(&mut self) {
+        self.capture = None;
+        let _ = self.shared.tx.send(Job::Shutdown);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+        info!("終了します...");
+    }
+
+    /// キーボードフックを設置し、設定画面のイベントループへ入る。
+    pub fn run(mut self) -> ! {
+        let config = self.shared.snapshot();
+        let hotkey = match win::parse_hotkey(&config.hotkey) {
             Ok(hotkey) => hotkey,
             Err(exc) => {
                 error!("{exc}");
-                let _ = shared.tx.send(Job::Shutdown);
-                let _ = worker.join();
-                return 1;
+                self.shutdown();
+                std::process::exit(1);
             }
         };
 
-        let press_shared = Arc::clone(&shared);
-        let release_shared = Arc::clone(&shared);
-        let cancel_shared = Arc::clone(&shared);
+        let press_shared = Arc::clone(&self.shared);
+        let release_shared = Arc::clone(&self.shared);
+        let cancel_shared = Arc::clone(&self.shared);
         let handler = win::HookHandler::new(
             hotkey,
             Box::new(move || press_shared.on_press()),
@@ -350,60 +532,50 @@ impl App {
             Box::new(move || cancel_shared.on_cancel()),
         );
 
-        let guard = match win::install(handler) {
+        let _guard = match win::install(handler) {
             Ok(guard) => guard,
             Err(exc) => {
                 error!("{exc}");
-                let _ = shared.tx.send(Job::Shutdown);
-                let _ = worker.join();
-                return 1;
+                self.shutdown();
+                std::process::exit(1);
             }
         };
 
         info!(
-            "準備完了: ホットキー={}（押している間だけ録音） / キャンセル=Esc / 終了=Ctrl+C",
-            shared.config.hotkey
+            "準備完了: ホットキー={} / キャンセル=Esc / トレイから設定を開けます",
+            config.hotkey
         );
-        win::run_message_loop();
-
-        drop(guard);
-        let _ = shared.tx.send(Job::Shutdown);
-        let _ = worker.join();
-        info!("終了します...");
-        0
+        crate::ui::run(self)
     }
 }
 
 /// 推論・貼り付けを直列化するワーカーループ。
-fn worker_loop(shared: Arc<Shared>, mut engine: Engine, rx: Receiver<Job>) {
+fn worker_loop(shared: Arc<Shared>, mut engine: Option<Engine>, rx: Receiver<Job>) {
     while let Ok(job) = rx.recv() {
         match job {
             Job::Shutdown => break,
-            Job::ReloadHotwords => {
-                if !shared.hotwords_supported.load(Ordering::Relaxed) {
-                    continue;
-                }
-                match Engine::build(&shared.config) {
-                    Ok(new_engine) => {
-                        shared
-                            .hotwords_supported
-                            .store(new_engine.supports_hotwords(), Ordering::Relaxed);
-                        engine = new_engine;
-                        info!("ホットリロード: 推論エンジンを再初期化しました");
-                    }
-                    Err(exc) => warn!(
-                        "ホットリロード: エンジン再初期化に失敗しました ({exc})。\
-                         旧エンジンで継続します。"
-                    ),
-                }
+            Job::Reconfigure => {
+                shared.engine_building.store(true, Ordering::SeqCst);
+                let config = shared.snapshot();
+                engine = shared.set_engine_result(Engine::build(&config));
             }
-            Job::Utterance(item) => process(&engine, &shared, &item),
+            Job::Utterance(item) => match engine.as_ref() {
+                Some(engine) => process(engine, &shared, &item),
+                None => {
+                    warn!(
+                        "モデルが未準備のため推論できません。設定画面からダウンロードしてください。"
+                    );
+                    lock(&shared.state).abort();
+                    shared.settle_visual();
+                }
+            },
         }
     }
 }
 
 /// 1 発話を推論し、整形してアクティブウィンドウへ貼り付ける。
 fn process(engine: &Engine, shared: &Shared, item: &Utterance) {
+    let config = shared.snapshot();
     // デバイスバッファの遅れを考慮し、tail 分が届くまで少し待つ。
     let deadline = Instant::now() + Duration::from_millis(config::WORKER_WAIT_TIMEOUT_MS);
     loop {
@@ -421,6 +593,7 @@ fn process(engine: &Engine, shared: &Shared, item: &Utterance) {
     if audio.is_empty() {
         warn!("音声データを取得できませんでした");
         lock(&shared.state).abort();
+        shared.settle_visual();
         return;
     }
     let xruns = shared.xruns.load(Ordering::Relaxed);
@@ -428,11 +601,11 @@ fn process(engine: &Engine, shared: &Shared, item: &Utterance) {
         debug!("オーディオ xruns: {xruns}");
     }
 
-    if shared.highpass {
+    if config.highpass {
         let started = Instant::now();
         crate::audio::highpass(
             &mut audio,
-            shared.sample_rate as f64,
+            config.sample_rate as f64,
             config::HIGHPASS_CUTOFF_HZ,
         );
         debug!(
@@ -455,7 +628,7 @@ fn process(engine: &Engine, shared: &Shared, item: &Utterance) {
     info!(
         "推論時間: {:.1} ms (音声 {:.2} 秒, RMS {:.4})",
         infer_ms,
-        audio.len() as f64 / shared.sample_rate as f64,
+        audio.len() as f64 / config.sample_rate as f64,
         rms
     );
     debug!("生の認識結果: {raw_text:?}");
@@ -464,20 +637,26 @@ fn process(engine: &Engine, shared: &Shared, item: &Utterance) {
     if formatted.is_empty() {
         info!("認識結果: (空) — ペーストしません");
         lock(&shared.state).abort();
+        shared.settle_visual();
         return;
     }
     info!("認識結果: {formatted}");
 
     lock(&shared.state).begin_pasting();
-    paste(shared, &formatted, item.released_at);
+    shared.settle_visual();
+    let pasted = paste(&config, &formatted, item.released_at);
     lock(&shared.state).finish_pasting();
+    shared.settle_visual();
+    if pasted && config.sound_finish {
+        sound::play(sound::Cue::Finish, config.sound_volume);
+    }
 }
 
 /// クリップボードへ格納し、Ctrl+V を 1 回送る。
 ///
 /// `restore_clipboard` が有効なら貼り付け後に元の内容へ戻す。
-fn paste(shared: &Shared, text: &str, released_at: Instant) {
-    let original = if shared.restore_clipboard {
+fn paste(config: &Config, text: &str, released_at: Instant) -> bool {
+    let original = if config.restore_clipboard {
         match win::clipboard_get() {
             Ok(original) => Some(original),
             Err(exc) => {
@@ -491,10 +670,10 @@ fn paste(shared: &Shared, text: &str, released_at: Instant) {
 
     if let Err(exc) = win::clipboard_set(text) {
         error!("クリップボードへ書き込めません: {exc}");
-        return;
+        return false;
     }
 
-    thread::sleep(shared.paste_delay);
+    thread::sleep(Duration::from_millis(config.paste_delay_ms as u64));
     let paste_ok = match win::send_ctrl_v() {
         Ok(()) => {
             info!(
@@ -509,11 +688,13 @@ fn paste(shared: &Shared, text: &str, released_at: Instant) {
         }
     };
 
-    if shared.restore_clipboard {
+    if config.restore_clipboard {
         if !paste_ok {
             warn!("貼り付けに失敗したため、認識結果をクリップボードに残します");
         } else if let Some(original) = original {
-            thread::sleep(shared.restore_delay);
+            thread::sleep(Duration::from_millis(
+                config.clipboard_restore_delay_ms as u64,
+            ));
             match win::clipboard_set(&original) {
                 Ok(()) => debug!("クリップボードを復元しました"),
                 Err(exc) => warn!("クリップボードの復元に失敗: {exc}"),
@@ -522,4 +703,5 @@ fn paste(shared: &Shared, text: &str, released_at: Instant) {
             debug!("元クリップボードが無いため復元しません");
         }
     }
+    paste_ok
 }

@@ -17,3 +17,6 @@ sherpa-onnx-*/
 # OS一時ファイル
 .DS_Store
 Thumbs.db
+
+# 実行時設定 (UI が自動生成)
+config.toml
