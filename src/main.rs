@@ -7,6 +7,7 @@ mod app;
 mod audio;
 mod config;
 mod engine;
+mod eval;
 mod logging;
 mod state;
 mod text;
@@ -31,12 +32,21 @@ fn main() {
     }
     logging::init(cli.debug);
 
-    if cli.list_devices {
-        std::process::exit(audio::list_input_devices());
+    if cli.sweep && cli.eval.is_none() {
+        eprintln!("--sweep は --eval <JSON> と一緒に指定してください");
+        std::process::exit(2);
     }
 
     let mut config = Config::default();
     config.apply_cli(&cli);
+
+    if let Some(path) = &cli.eval {
+        std::process::exit(eval::run(path, cli.sweep, &config));
+    }
+
+    if cli.list_devices {
+        std::process::exit(audio::list_input_devices());
+    }
 
     info!(
         "プラットフォーム: Windows / ホットキー={} / 貼り付け={}+{}",

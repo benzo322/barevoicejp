@@ -231,6 +231,10 @@ pub struct Cli {
     itn: Option<bool>,
     /// 入力デバイス一覧を表示して終了する。
     pub list_devices: bool,
+    /// テキスト整形の評価ケース JSON。
+    pub eval: Option<PathBuf>,
+    /// 評価時にファジーしきい値をスイープする。
+    pub sweep: bool,
     /// デバッグログを有効にする。
     pub debug: bool,
     /// ヘルプを表示して終了する。
@@ -264,6 +268,9 @@ SenseVoice / ReazonSpeech を使う Push-to-Talk 音声入力 (Windows)
                              貼り付け後に元のクリップボードを復元 (既定: OFF)
   --itn / --no-itn           SenseVoice の逆テキスト正規化 (既定: ON)
   --list-devices             入力デバイス一覧を表示して終了
+  --eval FILE                テキスト整形の評価ケース JSON を実行して終了
+                             音声キャプチャと ASR は初期化しない
+  --sweep                    --eval 時にファジーしきい値 70/75/80/85 を比較
   --debug                    デバッグログを表示
 ";
 
@@ -363,6 +370,8 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String
             "--itn" => cli.itn = Some(true),
             "--no-itn" => cli.itn = Some(false),
             "--list-devices" => cli.list_devices = true,
+            "--eval" => cli.eval = Some(PathBuf::from(take_value("--eval")?)),
+            "--sweep" => cli.sweep = true,
             "--debug" => cli.debug = true,
             other => {
                 if other.starts_with('-') {

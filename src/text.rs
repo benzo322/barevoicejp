@@ -23,8 +23,12 @@ const WORDS_TEMPLATE: &str = "\
 # 正式表記 : 代表読み
 # 読みが4文字以上かつ正式表記が4文字以上の項目だけファジーマッチ対象
 GitHub Actions : ギットハブアクションズ
+GitHub : ギットハブ
 Docker : ドッカー
+Kubernetes : クバネティス
 API : エーピーアイ
+PR : ピーアール
+DB : ディービー
 ";
 
 const PARTICLES: [char; 9] = ['で', 'に', 'を', 'は', 'が', 'の', 'と', 'へ', 'も'];
