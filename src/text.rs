@@ -277,6 +277,7 @@ pub fn load_words(path: &Path) -> Vec<WordEntry> {
 pub struct TextFormatter {
     remove_tags: bool,
     remove_ja_spaces: bool,
+    fuzzy: bool,
     fuzzy_threshold: f64,
     /// 長いキー順 (安定ソート)。
     replacements: Vec<(String, String)>,
@@ -287,12 +288,14 @@ pub struct TextFormatter {
 impl TextFormatter {
     /// 辞書としきい値から整形器を構築する。
     ///
+    /// `fuzzy` が false のときは完全一致だけを適用する。
     /// `fuzzy_threshold` は 0–100 に丸められる。読みと正式表記が
     /// [`FUZZY_MIN_CHARS`] 未満の項目はファジー対象外。
     pub fn new(
         replacements: &[(String, String)],
         words: &[WordEntry],
         fuzzy_threshold: f64,
+        fuzzy: bool,
         remove_tags: bool,
         remove_ja_spaces: bool,
     ) -> Self {
@@ -320,7 +323,8 @@ impl TextFormatter {
                     // 読みが短い語や API/PR/DB のような短い正式名は誤爆防止のため
                     // ファジーマッチ対象外にする。日本語の正式表記は表記揺れの
                     // 必要がないため、ASCII の正式表記だけを対象にする。
-                    if char_len(reading) >= FUZZY_MIN_CHARS
+                    if fuzzy
+                        && char_len(reading) >= FUZZY_MIN_CHARS
                         && char_len(&entry.target) >= FUZZY_MIN_CHARS
                         && is_ascii_word(&entry.target)
                     {
@@ -344,6 +348,7 @@ impl TextFormatter {
         Self {
             remove_tags,
             remove_ja_spaces,
+            fuzzy,
             fuzzy_threshold: threshold,
             replacements,
             fuzzy_entries,
@@ -369,13 +374,15 @@ impl TextFormatter {
         for (key, target) in &self.replacements {
             text = replace_all_with_boundaries(&text, key, target);
         }
-        text = self.apply_fuzzy(&text);
+        if self.fuzzy {
+            text = self.apply_fuzzy(&text);
+        }
         text = normalize_ascii_japanese_boundaries(&text);
         text.trim().to_string()
     }
 
     fn apply_fuzzy(&self, text: &str) -> String {
-        if self.fuzzy_entries.is_empty() || text.is_empty() {
+        if !self.fuzzy || self.fuzzy_entries.is_empty() || text.is_empty() {
             return text.to_string();
         }
         let text_chars: Vec<char> = text.chars().collect();
@@ -736,6 +743,7 @@ mod tests {
             80.0,
             true,
             true,
+            true,
         )
     }
 
@@ -748,6 +756,45 @@ mod tests {
         );
         assert_eq!(f.format("</s><unk> テスト"), "テスト");
         assert_eq!(f.format(""), "");
+    }
+
+    #[test]
+    fn exact_mode_does_not_rewrite_similar_words() {
+        let words = vec![
+            WordEntry {
+                target: "SharePoint".to_string(),
+                reading: Some("シェアポイント".to_string()),
+            },
+            WordEntry {
+                target: "Datadog".to_string(),
+                reading: Some("データドッグ".to_string()),
+            },
+            WordEntry {
+                target: "Docker".to_string(),
+                reading: Some("ドッカー".to_string()),
+            },
+            WordEntry {
+                target: "GitHub Actions".to_string(),
+                reading: Some("ギットハブアクションズ".to_string()),
+            },
+        ];
+        let f = TextFormatter::new(&[], &words, 80.0, false, true, true);
+
+        // 類似しているだけの語は書き換えない。
+        assert_eq!(
+            f.format("パワーポイントで資料を作る"),
+            "パワーポイントで資料を作る"
+        );
+        assert_eq!(f.format("データベースに接続する"), "データベースに接続する");
+        assert_eq!(
+            f.format("ギッタハブアクションズを使う"),
+            "ギッタハブアクションズを使う"
+        );
+
+        // 読みの完全一致は置換する。
+        assert_eq!(f.format("シェアポイントを開く"), "SharePoint を開く");
+        assert_eq!(f.format("データドッグを確認する"), "Datadog を確認する");
+        assert_eq!(f.format("ドッカーを起動"), "Docker を起動");
     }
 
     #[test]
@@ -779,6 +826,7 @@ mod tests {
             &config.replacements,
             &words,
             config.fuzzy_threshold,
+            true,
             true,
             true,
         );

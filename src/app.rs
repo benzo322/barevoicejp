@@ -290,6 +290,7 @@ fn build_formatter(
         &replacements,
         words,
         config.fuzzy_threshold,
+        config.fuzzy,
         config.remove_tags,
         config.remove_ja_spaces,
     )

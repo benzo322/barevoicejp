@@ -92,11 +92,34 @@ pub fn run(path: &Path, sweep: bool, config: &Config) -> i32 {
         .cloned()
         .collect();
 
-    let formatter = build_formatter(config, &replacements, &words, config.fuzzy_threshold);
+    // ファジー無効時は fuzzy_variant ケースを評価対象から外す。
+    // --sweep はしきい値比較のためファジーを強制する。
+    let fuzzy = config.fuzzy || sweep;
+    let skipped = if fuzzy {
+        0
+    } else {
+        cases
+            .iter()
+            .filter(|case| case.category == "fuzzy_variant")
+            .count()
+    };
+    let cases: Vec<EvalCase> = if fuzzy {
+        cases
+    } else {
+        cases
+            .into_iter()
+            .filter(|case| case.category != "fuzzy_variant")
+            .collect()
+    };
+
+    let formatter = build_formatter(config, &replacements, &words, config.fuzzy_threshold, fuzzy);
     let outcomes = evaluate(&cases, &formatter);
 
     println!("=== テキスト整形 評価 ===");
     println!("ケース: {}", path.display());
+    if skipped > 0 {
+        println!("スキップ: fuzzy_variant {skipped} 件 (--fuzzy で有効)");
+    }
     print_report(config.fuzzy_threshold, &outcomes);
 
     if sweep {
@@ -115,11 +138,13 @@ fn build_formatter(
     replacements: &[(String, String)],
     words: &[WordEntry],
     threshold: f64,
+    fuzzy: bool,
 ) -> TextFormatter {
     TextFormatter::new(
         replacements,
         words,
         threshold,
+        fuzzy,
         config.remove_tags,
         config.remove_ja_spaces,
     )
@@ -196,7 +221,7 @@ fn print_sweep(
     let results: Vec<ThresholdResult> = SWEEP_THRESHOLDS
         .iter()
         .map(|&threshold| {
-            let formatter = build_formatter(config, replacements, words, threshold);
+            let formatter = build_formatter(config, replacements, words, threshold, true);
             ThresholdResult {
                 threshold,
                 outcomes: evaluate(cases, &formatter),
@@ -382,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_cases_pass_at_default_threshold() {
+    fn committed_cases_pass_with_fuzzy() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let cases =
             load_cases(&root.join("tests/text_cases.json")).expect("評価ケースを読み込める");
@@ -395,11 +420,12 @@ mod tests {
             .chain(external.iter())
             .cloned()
             .collect();
-        let formatter = build_formatter(&config, &replacements, &words, config.fuzzy_threshold);
+        let formatter =
+            build_formatter(&config, &replacements, &words, config.fuzzy_threshold, true);
         let failures: Vec<Outcome> = evaluate(&cases, &formatter)
             .into_iter()
             .filter(|outcome| !outcome.pass)
             .collect();
-        assert!(failures.is_empty(), "既定しきい値で失敗: {failures:?}");
+        assert!(failures.is_empty(), "ファジー有効時に失敗: {failures:?}");
     }
 }

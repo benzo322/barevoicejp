@@ -40,7 +40,7 @@
   {"category": "compound", "input": "APIとDBを連携する", "expected": "API と DB を連携する"},
   {"category": "compound", "input": "PRとDBの連携", "expected": "PR と DB の連携"},
   {"category": "compound", "input": "ドッカーとクバネティスで構築する", "expected": "Docker と Kubernetes で構築する"},
-  {"category": "compound", "input": "ギッタハブアクションズドッカー連携", "expected": "GitHub Actions Docker 連携"},
+  {"category": "fuzzy_variant", "input": "ギッタハブアクションズドッカー連携", "expected": "GitHub Actions Docker 連携"},
   {"category": "compound", "input": "DockerとKubernetesを連携する", "expected": "Docker と Kubernetes を連携する"},
 
   {"category": "short_word", "input": "エーピーアイを使う", "expected": "API を使う"},

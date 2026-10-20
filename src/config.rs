@@ -125,6 +125,8 @@ pub struct Config {
     // --- テキスト整形 ---
     pub remove_tags: bool,
     pub remove_ja_spaces: bool,
+    /// ファジーマッチを有効にする (既定 OFF)。
+    pub fuzzy: bool,
     /// words.txt のファジーマッチしきい値 (%)。
     pub fuzzy_threshold: f64,
     /// 組み込みの完全一致置換 (replacements.json が優先)。
@@ -165,6 +167,7 @@ impl Default for Config {
 
             remove_tags: true,
             remove_ja_spaces: true,
+            fuzzy: false,
             fuzzy_threshold: 80.0,
             replacements: default_replacements(),
         }
@@ -229,6 +232,8 @@ pub struct Cli {
     paste_delay_ms: Option<u32>,
     restore_clipboard: Option<bool>,
     itn: Option<bool>,
+    /// ファジーマッチを有効にする。
+    pub fuzzy: bool,
     /// 入力デバイス一覧を表示して終了する。
     pub list_devices: bool,
     /// テキスト整形の評価ケース JSON。
@@ -267,6 +272,7 @@ SenseVoice / ReazonSpeech を使う Push-to-Talk 音声入力 (Windows)
   --restore-clipboard / --no-restore-clipboard
                              貼り付け後に元のクリップボードを復元 (既定: OFF)
   --itn / --no-itn           SenseVoice の逆テキスト正規化 (既定: ON)
+  --fuzzy                    あいまい一致を有効化 (既定: OFF、完全一致のみ)
   --list-devices             入力デバイス一覧を表示して終了
   --eval FILE                テキスト整形の評価ケース JSON を実行して終了
                              音声キャプチャと ASR は初期化しない
@@ -369,6 +375,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String
             "--no-restore-clipboard" => cli.restore_clipboard = Some(false),
             "--itn" => cli.itn = Some(true),
             "--no-itn" => cli.itn = Some(false),
+            "--fuzzy" => cli.fuzzy = true,
             "--list-devices" => cli.list_devices = true,
             "--eval" => cli.eval = Some(PathBuf::from(take_value("--eval")?)),
             "--sweep" => cli.sweep = true,
@@ -432,6 +439,26 @@ impl Config {
         if let Some(value) = cli.itn {
             self.use_itn = value;
         }
+        if cli.fuzzy {
+            self.fuzzy = true;
+        }
         self.model_dir_override = cli.model_dir.clone();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fuzzy_is_off_by_default_and_enabled_by_flag() {
+        let mut config = Config::default();
+        assert!(!config.fuzzy);
+
+        config.apply_cli(&parse_args(Vec::<String>::new()).expect("空の引数"));
+        assert!(!config.fuzzy);
+
+        config.apply_cli(&parse_args(["--fuzzy".to_string()]).expect("--fuzzy"));
+        assert!(config.fuzzy);
     }
 }
