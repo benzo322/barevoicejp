@@ -238,14 +238,14 @@
     color:#4338ca;background:rgba(238,242,255,.9);border:1px solid rgba(99,102,241,.15);cursor:pointer}
   .theme-play:hover{background:#fff;border-color:rgba(99,102,241,.35)}
   .tab-emoji{font-size:13px;line-height:1;filter:saturate(1.05)}
-  .guide-panel{overflow-y:auto;padding-right:6px;padding-bottom:6px}
+  .guide-panel{overflow-y:auto;padding-right:6px;padding-bottom:2px}
   .guide-grid{align-items:start}
   .memo-card{background:linear-gradient(160deg,rgba(255,255,255,.94),rgba(248,251,255,.72))}
-  .memo-quote{position:relative;padding:16px 18px 16px 23px;border-radius:16px;background:rgba(255,255,255,.6);
+  .memo-quote{position:relative;padding:14px 18px 14px 23px;border-radius:16px;background:rgba(255,255,255,.6);
     border:1px solid rgba(148,163,184,.14)}
   .memo-quote::before{content:"“";position:absolute;left:9px;top:4px;font-size:36px;line-height:1;color:rgba(99,102,241,.2);
     font-family:Georgia,"Times New Roman",serif}
-  .memo-quote p{margin:0 0 11px;font-size:12.5px;line-height:1.9;color:#334155}
+  .memo-quote p{margin:0 0 9px;font-size:12.5px;line-height:1.78;color:#334155}
   .memo-quote p:last-child{margin-bottom:0}
   .memo-signature{display:flex;flex-direction:column;align-items:flex-end;gap:1px;width:max-content;
     margin:12px 4px 0 auto;padding-top:9px;border-top:1px solid rgba(148,163,184,.15);
@@ -265,16 +265,22 @@
   .guide-note{display:flex;align-items:center;gap:7px;margin-top:12px;padding-top:12px;border-top:1px solid rgba(148,163,184,.13);
     font-size:10.5px;line-height:1.6;color:#94a3b8}
   .guide-note svg{width:13px;height:13px;flex:none;color:#818cf8}
-  .tech-card{margin-top:14px;margin-bottom:2px}
-  .tech-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(248px,1fr));gap:9px}
-  .tech-item{padding:11px 13px;border-radius:13px;background:rgba(255,255,255,.58);
-    border:1px solid rgba(148,163,184,.14)}
-  .tech-label{font-size:9.5px;letter-spacing:.1em;font-weight:700;color:#94a3b8}
-  .tech-value{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-top:5px;
-    font-size:12px;font-weight:650;color:#1e293b;letter-spacing:-.01em}
-  .tech-value code{font-family:"Cascadia Code","Consolas",monospace;font-size:10px;font-weight:600;color:#4338ca;
-    padding:2px 6px;border-radius:6px;background:rgba(238,242,255,.85);border:1px solid rgba(99,102,241,.14)}
-  .tech-desc{margin-top:4px;font-size:10.5px;line-height:1.6;color:#7c8ba1}
+  .stack-panel.active{display:flex;flex-direction:column;overflow:hidden;padding-right:6px}
+  .stack-grid{flex:1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));grid-auto-rows:auto;
+    align-content:center;gap:14px;min-height:0}
+  .stack-card{display:flex;flex-direction:column;gap:10px;justify-content:space-between;padding:22px 24px;
+    background:linear-gradient(150deg,rgba(255,255,255,.92),rgba(248,251,255,.68))}
+  .stack-head{display:flex;align-items:center;gap:12px}
+  .stack-icon{width:36px;height:36px;border-radius:12px;display:grid;place-items:center;flex:none;color:#fff;
+    background:linear-gradient(135deg,#7dd3fc,#818cf8);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.7),0 8px 18px -12px rgba(79,70,229,.55)}
+  .stack-icon svg{width:17px;height:17px}
+  .stack-kicker{font-size:9px;letter-spacing:.16em;font-weight:700;color:#94a3b8}
+  .stack-card h2{margin:2px 0 0;font-size:16px}
+  .stack-desc{order:2;margin:6px 0 0;font-size:12px;line-height:1.8;color:#64748b}
+  .stack-tech{order:3;display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:2px;padding-top:8px}
+  .stack-tech code{font-family:"Cascadia Code","Consolas",monospace;font-size:10.5px;font-weight:600;color:#4338ca;
+    padding:3px 8px;border-radius:7px;background:rgba(238,242,255,.85);border:1px solid rgba(99,102,241,.14)}
   .footer{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:10px 6px 0;font-size:10.5px;color:#9aa8ba;flex:none}
   .footer .hint{display:flex;align-items:center;gap:6px}
   .footer svg{width:12px;height:12px}
@@ -355,6 +361,9 @@
     </button>
     <button class="tab" data-tab="guide">
       <span class="tab-emoji" aria-hidden="true">💡</span>ガイド
+    </button>
+    <button class="tab" data-tab="stack">
+      <span class="tab-emoji" aria-hidden="true">🛠</span>スタック
     </button>
   </nav>
 
@@ -573,54 +582,58 @@
         </div>
       </article>
     </div>
+  </section>
 
-    <article class="card tech-card">
-      <div class="card-head">
-        <div>
-          <div class="kicker" style="margin-bottom:6px">UNDER THE HOOD</div>
-          <h2>🛠 技術スタック（裏側の仕組み）</h2>
-          <p class="sub">軽さの代わりに、仕組みはすべて自前。この PC の外には何も出ません。</p>
+  <section class="panel stack-panel" data-panel="stack">
+    <div class="grid two stack-grid">
+      <article class="card stack-card">
+        <div class="stack-head">
+          <div class="stack-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="7" width="10" height="10" rx="2"/><path d="M10 2v3M14 2v3M10 19v3M14 19v3M2 10h3M2 14h3M19 10h3M19 14h3"/></svg></div>
+          <div>
+            <div class="stack-kicker">LANGUAGE / CORE</div>
+            <h2>言語 / 基盤</h2>
+          </div>
         </div>
-        <span class="badge green">100% LOCAL</span>
-      </div>
-      <div class="tech-grid">
-        <div class="tech-item">
-          <div class="tech-label">コア言語</div>
-          <div class="tech-value"><code>Rust</code></div>
-          <div class="tech-desc">単一ネイティブバイナリ / メモリ安全 / C-API FFI</div>
+        <div class="stack-tech"><code>Rust</code></div>
+        <p class="stack-desc">単一ネイティブバイナリ。実行時のランタイムも外部依存もありません。</p>
+      </article>
+
+      <article class="card stack-card">
+        <div class="stack-head">
+          <div class="stack-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="3"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg></div>
+          <div>
+            <div class="stack-kicker">INPUT / CONTROL</div>
+            <h2>入力・制御</h2>
+          </div>
         </div>
-        <div class="tech-item">
-          <div class="tech-label">音声推論</div>
-          <div class="tech-value"><code>sherpa-onnx</code><code>ONNX Runtime</code></div>
-          <div class="tech-desc">SenseVoice / ReazonSpeech / Whisper Turbo</div>
+        <div class="stack-tech"><code>Win32 API</code><code>WH_KEYBOARD_LL</code><code>SendInput</code></div>
+        <p class="stack-desc">低レベルキーフックで右Altを監視し、SendInput でそのまま直接貼り付けます。</p>
+      </article>
+
+      <article class="card stack-card">
+        <div class="stack-head">
+          <div class="stack-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M3 9h18M7 4v5"/><path d="M8 21h8"/></svg></div>
+          <div>
+            <div class="stack-kicker">UI / RUNTIME</div>
+            <h2>UIフレームワーク</h2>
+          </div>
         </div>
-        <div class="tech-item">
-          <div class="tech-label">オーディオ処理</div>
-          <div class="tech-value"><code>cpal</code><code>16kHz リサンプラー</code></div>
-          <div class="tech-desc">80Hz ハイパスフィルタ / 200ms プリロール</div>
+        <div class="stack-tech"><code>WebView2</code><code>wry</code><code>tao</code></div>
+        <p class="stack-desc">軽量なローカルUI。Windows 標準の WebView2 を wry / tao から直接扱います。</p>
+      </article>
+
+      <article class="card stack-card">
+        <div class="stack-head">
+          <div class="stack-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 4.4 3.2 7.7 8 9 4.8-1.3 8-4.6 8-9V6l-8-3Z"/><path d="m9 12 2 2 4-4"/></svg></div>
+          <div>
+            <div class="stack-kicker">SECURITY</div>
+            <h2>セキュリティ</h2>
+          </div>
         </div>
-        <div class="tech-item">
-          <div class="tech-label">Windows API</div>
-          <div class="tech-value"><code>WH_KEYBOARD_LL</code><code>SendInput</code></div>
-          <div class="tech-desc">右Alt制御 / 直貼り / レイヤード非活性オーバーレイ</div>
-        </div>
-        <div class="tech-item">
-          <div class="tech-label">自然言語処理</div>
-          <div class="tech-value">助詞保護ロジック</div>
-          <div class="tech-desc">辞書完全一致置換 / 英日境界自動スペース / ホットリロード</div>
-        </div>
-        <div class="tech-item">
-          <div class="tech-label">UIレイヤー</div>
-          <div class="tech-value"><code>WebView2</code><code>wry / tao</code></div>
-          <div class="tech-desc">ゼロ依存・完全ローカルGUI</div>
-        </div>
-        <div class="tech-item">
-          <div class="tech-label">セキュリティ</div>
-          <div class="tech-value">通信機能なし</div>
-          <div class="tech-desc">完全ローカル完結・外部送信ゼロ</div>
-        </div>
-      </div>
-    </article>
+        <div class="stack-tech"><code>完全ローカル</code><code>外部送信ゼロ</code></div>
+        <p class="stack-desc">外部通信機能はゼロ。音声も認識結果も、この PC の外へは一切出ません。</p>
+      </article>
+    </div>
   </section>
 
   <footer class="footer">

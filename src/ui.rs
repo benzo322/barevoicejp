@@ -283,6 +283,19 @@ fn place_window(window: &Window) {
     window.set_outer_position(PhysicalPosition::new(x, y));
 }
 
+/// プライマリディスプレイのワークエリア中央へオンボーディングを配置する。
+///
+/// 初回起動時はフローティングバーの位置に関係なく、画面の X / Y とも完全な中央に出す。
+fn place_window_centered(window: &Window) {
+    let Some(work) = work_area() else {
+        return;
+    };
+    let size = window.outer_size();
+    let x = work.left + ((work.right - work.left) - size.width as i32) / 2;
+    let y = work.top + ((work.bottom - work.top) - size.height as i32) / 2;
+    window.set_outer_position(PhysicalPosition::new(x, y));
+}
+
 /// 初回起動用のオンボーディングを作成して表示する。
 ///
 /// サイズは通常の設定画面と揃える。
@@ -316,7 +329,7 @@ fn build_onboarding(
         .build(&window)
         .map_err(|exc| format!("オンボーディング画面を初期化できません: {exc}"))?;
 
-    place_window(&window);
+    place_window_centered(&window);
     window.set_visible(true);
     window.set_focus();
     win::force_foreground(window.hwnd() as *mut core::ffi::c_void);
