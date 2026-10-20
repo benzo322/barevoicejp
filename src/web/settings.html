@@ -247,6 +247,13 @@
     font-family:Georgia,"Times New Roman",serif}
   .memo-quote p{margin:0 0 11px;font-size:12.5px;line-height:1.9;color:#334155}
   .memo-quote p:last-child{margin-bottom:0}
+  .memo-signature{display:flex;flex-direction:column;align-items:flex-end;gap:1px;width:max-content;
+    margin:12px 4px 0 auto;padding-top:9px;border-top:1px solid rgba(148,163,184,.15);
+    transform:rotate(-3deg);transform-origin:right center}
+  .memo-signature .name{font-family:"Segoe Script","Ink Free","Bradley Hand","Comic Sans MS",cursive;
+    font-size:25px;line-height:1.1;color:#334155;letter-spacing:.01em;padding-right:7px;
+    text-shadow:0 1px 0 rgba(255,255,255,.8)}
+  .memo-signature svg{width:116px;height:9px;color:#6366f1;opacity:.4;margin-top:-2px}
   .guide-steps{display:flex;flex-direction:column;gap:10px}
   .guide-step{display:flex;align-items:flex-start;gap:12px;padding:13px 14px;border-radius:15px;
     background:rgba(255,255,255,.58);border:1px solid rgba(148,163,184,.14)}
@@ -516,6 +523,10 @@
           <p>そもそも相手はCopilotなんだから、手元のツールで綺麗に清書する必要なんてない。文脈はあっちが勝手に忖度して読んでくれるしね。</p>
           <p>だから「ネットに一切出ない完全ローカル」で「ホットキー離したら0.2秒で思考がそのまま貼り付く」やつを作りました。</p>
           <p>綺麗に喋ろうとせず、頭の中のモヤモヤをそのまましゃべってください。copilotとの距離が近くなるはず。</p>
+          <div class="memo-signature" aria-label="mizobey">
+            <span class="name">mizobey</span>
+            <svg viewBox="0 0 150 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 7c23-5 48-6 74-3 22 2 44 3 70-1"/></svg>
+          </div>
         </div>
       </article>
 

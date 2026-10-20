@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
+use tao::dpi::{LogicalSize, PhysicalPosition};
 use tao::event::{Event, WindowEvent};
 use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
 use tao::platform::windows::WindowExtWindows;
@@ -123,7 +123,7 @@ pub(crate) fn run(mut app: App) -> ! {
         crate::warn!("トレイアイコンを初期化できません: {exc}");
     }
 
-    // 初回起動時だけ、設定画面とは別の全画面オンボーディングを開く。
+    // 初回起動時だけ、設定画面とは別のオンボーディングを開く。
     // 「はじめる」までは設定画面を表示しない。
     let onboarding = if first_run {
         match build_onboarding(&event_loop, proxy.clone()) {
@@ -283,19 +283,17 @@ fn place_window(window: &Window) {
     window.set_outer_position(PhysicalPosition::new(x, y));
 }
 
-/// 初回起動用の全画面オンボーディングを作成して表示する。
+/// 初回起動用のオンボーディングを作成して表示する。
+///
+/// サイズは通常の設定画面と揃える。
 fn build_onboarding(
     event_loop: &EventLoop<UiEvent>,
     proxy: EventLoopProxy<UiEvent>,
 ) -> Result<(Window, WebView), String> {
-    let work = work_area().ok_or_else(|| "ワークエリアを取得できません".to_string())?;
-    let width = (work.right - work.left).max(640) as u32;
-    let height = (work.bottom - work.top).max(480) as u32;
-
     let window = WindowBuilder::new()
         .with_title("BAREVoiceJP — ようこそ")
-        .with_inner_size(PhysicalSize::new(width, height))
-        .with_position(PhysicalPosition::new(work.left, work.top))
+        .with_inner_size(LogicalSize::new(1080.0, 800.0))
+        .with_min_inner_size(LogicalSize::new(1000.0, 720.0))
         .with_decorations(false)
         .with_resizable(false)
         .with_visible(false)
@@ -318,6 +316,7 @@ fn build_onboarding(
         .build(&window)
         .map_err(|exc| format!("オンボーディング画面を初期化できません: {exc}"))?;
 
+    place_window(&window);
     window.set_visible(true);
     window.set_focus();
     win::force_foreground(window.hwnd() as *mut core::ffi::c_void);
