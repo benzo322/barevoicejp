@@ -1,12 +1,15 @@
 //! 通知音の合成と再生。
 //!
-//! 外部ファイルを使わず、柔らかいサイン波を合成する。開始音は低めの
-//! 「フワン…」、完了音は 440Hz を中心とした和音が余韻を残して消える。
+//! 4 つのテーマを、外部ファイルなしのサイン波で合成する。
+//! `soft` は環境音のような余韻、`pop` は明るいメリハリ、`chime` は
+//! クリスタルなベル、`subtle` は短く控えめなタップ音。
 
 use std::f32::consts::TAU;
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+use crate::config::SoundTheme;
 
 /// 再生する通知音。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,12 +18,17 @@ pub enum Cue {
     Finish,
 }
 
-impl Cue {
-    fn duration(self) -> f32 {
-        match self {
-            Self::Start => 0.12,
-            Self::Finish => 0.55,
-        }
+/// テーマと種類ごとの長さ。
+pub fn duration(theme: SoundTheme, cue: Cue) -> f32 {
+    match (theme, cue) {
+        (SoundTheme::Soft, Cue::Start) => 0.12,
+        (SoundTheme::Soft, Cue::Finish) => 0.55,
+        (SoundTheme::Pop, Cue::Start) => 0.14,
+        (SoundTheme::Pop, Cue::Finish) => 0.22,
+        (SoundTheme::Chime, Cue::Start) => 0.45,
+        (SoundTheme::Chime, Cue::Finish) => 0.80,
+        (SoundTheme::Subtle, Cue::Start) => 0.05,
+        (SoundTheme::Subtle, Cue::Finish) => 0.06,
     }
 }
 
@@ -29,10 +37,22 @@ fn smoothstep(value: f32) -> f32 {
     value * value * (3.0 - 2.0 * value)
 }
 
+fn progress(index: usize, count: usize) -> f32 {
+    if count > 1 {
+        index as f32 / (count - 1) as f32
+    } else {
+        0.0
+    }
+}
+
+fn release(progress: f32, duration: f32, seconds: f32) -> f32 {
+    smoothstep(((1.0 - progress) * duration) / seconds)
+}
+
 /// 通知音を合成する。値域は -1.0..=1.0。
-pub fn synthesize(cue: Cue, sample_rate: u32, volume: f32) -> Vec<f32> {
+pub fn synthesize(theme: SoundTheme, cue: Cue, sample_rate: u32, volume: f32) -> Vec<f32> {
     let rate = sample_rate.max(8_000) as f32;
-    let duration = cue.duration();
+    let duration = duration(theme, cue);
     let count = (duration * rate) as usize;
     let volume = volume.clamp(0.0, 1.0);
     let mut samples = Vec::with_capacity(count);
@@ -42,33 +62,86 @@ pub fn synthesize(cue: Cue, sample_rate: u32, volume: f32) -> Vec<f32> {
 
     for index in 0..count {
         let t = index as f32 / rate;
-        let progress = if count > 1 {
-            index as f32 / (count - 1) as f32
-        } else {
-            0.0
-        };
+        let p = progress(index, count);
 
-        let sample = match cue {
-            Cue::Start => {
-                // 390Hz から 355Hz へわずかに下がる、温かいサイン波。
-                let frequency = 390.0 - 35.0 * progress;
-                phase += TAU * frequency / rate;
-                let attack = smoothstep(t / 0.030);
-                let release = smoothstep(((1.0 - progress) * duration) / 0.070);
-                let decay = (-1.6 * progress).exp();
-                phase.sin() * attack * release * decay * volume * 0.34
-            }
-            Cue::Finish => {
-                // A4 / C#5 / E5 の和音。少しずつ下降させ、空間に溶かす。
-                phase += TAU * (440.0 - 2.0 * progress) / rate;
-                second += TAU * (554.365 - 2.0 * progress) / rate;
-                third += TAU * (659.255 - 3.0 * progress) / rate;
-                let attack = smoothstep(t / 0.025);
-                let release = smoothstep(((1.0 - progress) * duration) / 0.50);
-                let decay = (-2.4 * progress).exp();
-                let chord = phase.sin() * 0.55 + second.sin() * 0.27 + third.sin() * 0.18;
-                chord * attack * release * decay * volume * 0.34
-            }
+        let sample = match theme {
+            SoundTheme::Soft => match cue {
+                Cue::Start => {
+                    let frequency = 390.0 - 35.0 * p;
+                    phase += TAU * frequency / rate;
+                    let attack = smoothstep(t / 0.030);
+                    phase.sin()
+                        * attack
+                        * release(p, duration, 0.070)
+                        * (-1.6 * p).exp()
+                        * volume
+                        * 0.34
+                }
+                Cue::Finish => {
+                    phase += TAU * (440.0 - 2.0 * p) / rate;
+                    second += TAU * (554.365 - 2.0 * p) / rate;
+                    third += TAU * (659.255 - 3.0 * p) / rate;
+                    let attack = smoothstep(t / 0.025);
+                    let chord = phase.sin() * 0.55 + second.sin() * 0.27 + third.sin() * 0.18;
+                    chord * attack * release(p, duration, 0.50) * (-2.4 * p).exp() * volume * 0.34
+                }
+            },
+            SoundTheme::Pop => match cue {
+                Cue::Start => {
+                    let frequency = 880.0 + 520.0 * p;
+                    phase += TAU * frequency / rate;
+                    let attack = smoothstep(t / 0.004);
+                    let tone = phase.sin() + (phase * 2.0).sin() * 0.18;
+                    tone * attack * release(p, duration, 0.045) * (-7.0 * p).exp() * volume * 0.30
+                }
+                Cue::Finish => {
+                    let frequency = 620.0 - 180.0 * p;
+                    phase += TAU * frequency / rate;
+                    let attack = smoothstep(t / 0.005);
+                    let tone = phase.sin() + (phase * 2.0).sin() * 0.20;
+                    tone * attack * release(p, duration, 0.060) * (-8.0 * p).exp() * volume * 0.34
+                }
+            },
+            SoundTheme::Chime => match cue {
+                Cue::Start => {
+                    phase += TAU * 1046.5 / rate;
+                    second += TAU * 1568.0 / rate;
+                    let attack = smoothstep(t / 0.003);
+                    let bell =
+                        phase.sin() * 0.60 + second.sin() * 0.30 + (phase * 2.0).sin() * 0.10;
+                    bell * attack * release(p, duration, 0.18) * (-4.5 * p).exp() * volume * 0.30
+                }
+                Cue::Finish => {
+                    phase += TAU * 1318.5 / rate;
+                    second += TAU * 1975.5 / rate;
+                    third += TAU * 1661.2 / rate;
+                    let attack = smoothstep(t / 0.005);
+                    let bell = phase.sin() * 0.45 + second.sin() * 0.30 + third.sin() * 0.25;
+                    bell * attack * release(p, duration, 0.35) * (-3.2 * p).exp() * volume * 0.26
+                }
+            },
+            SoundTheme::Subtle => match cue {
+                Cue::Start => {
+                    phase += TAU * 220.0 / rate;
+                    let attack = smoothstep(t / 0.002);
+                    phase.sin()
+                        * attack
+                        * release(p, duration, 0.025)
+                        * (-12.0 * p).exp()
+                        * volume
+                        * 0.12
+                }
+                Cue::Finish => {
+                    phase += TAU * 320.0 / rate;
+                    let attack = smoothstep(t / 0.002);
+                    phase.sin()
+                        * attack
+                        * release(p, duration, 0.030)
+                        * (-11.0 * p).exp()
+                        * volume
+                        * 0.10
+                }
+            },
         };
         samples.push(sample);
     }
@@ -76,7 +149,7 @@ pub fn synthesize(cue: Cue, sample_rate: u32, volume: f32) -> Vec<f32> {
 }
 
 /// 通知音を非同期に再生する。音声デバイスが無い場合は静かに諦める。
-pub fn play(cue: Cue, volume: f32) {
+pub fn play(theme: SoundTheme, cue: Cue, volume: f32) {
     if volume <= 0.0 {
         return;
     }
@@ -92,7 +165,7 @@ pub fn play(cue: Cue, volume: f32) {
             };
             let sample_rate = config.sample_rate().0;
             let channels = config.channels() as usize;
-            let samples = synthesize(cue, sample_rate, volume);
+            let samples = synthesize(theme, cue, sample_rate, volume);
 
             let stream = match config.sample_format() {
                 cpal::SampleFormat::F32 => build(&device, &config, samples, channels, |v| v),
@@ -110,7 +183,7 @@ pub fn play(cue: Cue, volume: f32) {
             if stream.play().is_err() {
                 return;
             }
-            std::thread::sleep(Duration::from_secs_f32(cue.duration() + 0.08));
+            std::thread::sleep(Duration::from_secs_f32(duration(theme, cue) + 0.08));
         })
         .ok();
 }
@@ -155,21 +228,46 @@ where
 mod tests {
     use super::*;
 
+    const THEMES: [SoundTheme; 4] = [
+        SoundTheme::Soft,
+        SoundTheme::Pop,
+        SoundTheme::Chime,
+        SoundTheme::Subtle,
+    ];
+
+    fn peak(samples: &[f32]) -> f32 {
+        samples
+            .iter()
+            .fold(0.0f32, |max, value| max.max(value.abs()))
+    }
+
     #[test]
-    fn synthesized_cues_are_soft_and_fade_out() {
-        for cue in [Cue::Start, Cue::Finish] {
-            let samples = synthesize(cue, 44_100, 0.8);
-            assert!(!samples.is_empty());
-            assert!(samples.iter().all(|value| value.abs() <= 0.4));
-            assert!(samples[0].abs() < 1e-6);
-            assert!(samples.last().copied().unwrap_or(1.0).abs() < 1e-6);
+    fn all_themes_fade_in_and_out() {
+        for theme in THEMES {
+            for cue in [Cue::Start, Cue::Finish] {
+                let samples = synthesize(theme, cue, 44_100, 0.8);
+                assert!(!samples.is_empty(), "{theme:?} {cue:?}");
+                assert!(peak(&samples) <= 0.4, "{theme:?} {cue:?}");
+                assert!(samples[0].abs() < 1e-6, "{theme:?} {cue:?}");
+                assert!(
+                    samples.last().copied().unwrap_or(1.0).abs() < 1e-6,
+                    "{theme:?} {cue:?}"
+                );
+            }
         }
     }
 
     #[test]
-    fn start_cue_has_a_gentle_attack() {
+    fn subtle_is_quieter_than_pop() {
+        let subtle = synthesize(SoundTheme::Subtle, Cue::Start, 44_100, 1.0);
+        let pop = synthesize(SoundTheme::Pop, Cue::Start, 44_100, 1.0);
+        assert!(peak(&subtle) < peak(&pop));
+    }
+
+    #[test]
+    fn soft_start_has_a_gentle_attack() {
         let rate = 44_100u32;
-        let samples = synthesize(Cue::Start, rate, 1.0);
+        let samples = synthesize(SoundTheme::Soft, Cue::Start, rate, 1.0);
         let at = |millis: f32| samples[(rate as f32 * millis / 1000.0) as usize].abs();
         assert!(
             at(30.0) > at(5.0) * 2.0,
@@ -181,7 +279,7 @@ mod tests {
 
     #[test]
     fn zero_volume_is_silent() {
-        let samples = synthesize(Cue::Finish, 16_000, 0.0);
+        let samples = synthesize(SoundTheme::Soft, Cue::Finish, 16_000, 0.0);
         assert!(samples.iter().all(|value| *value == 0.0));
     }
 }

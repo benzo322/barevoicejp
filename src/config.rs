@@ -134,27 +134,36 @@ fn default_model_dir(name: &str) -> PathBuf {
     models_root().join(name)
 }
 
-/// ホットキーの押し方。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InputMode {
-    /// 押している間だけ録音する。
-    PushToTalk,
-    /// 1 回押すと録音開始、もう 1 回で停止する。
-    Toggle,
+/// 通知音のテーマ。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SoundTheme {
+    /// アンビエントな「フワン…」と和音フェード。
+    #[default]
+    Soft,
+    /// 明るくメリハリのある「ピコッ」「ポンッ」。
+    Pop,
+    /// 透明感のあるベル・チャイム。
+    Chime,
+    /// ごく控えめな短いタップ音。
+    Subtle,
 }
 
-impl InputMode {
+impl SoundTheme {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::PushToTalk => "push_to_talk",
-            Self::Toggle => "toggle",
+            Self::Soft => "soft",
+            Self::Pop => "pop",
+            Self::Chime => "chime",
+            Self::Subtle => "subtle",
         }
     }
 
     pub fn parse(value: &str) -> Self {
         match value {
-            "toggle" | "two_press" | "2press" => Self::Toggle,
-            _ => Self::PushToTalk,
+            "pop" => Self::Pop,
+            "chime" => Self::Chime,
+            "subtle" => Self::Subtle,
+            _ => Self::Soft,
         }
     }
 }
@@ -183,8 +192,6 @@ pub struct Config {
     // --- 録音 / ホットキー ---
     /// 押している間だけ録音するキー名 (`alt_r`, `f9`, `ctrl_r` など)。
     pub hotkey: String,
-    /// 押し方 (PTT / 2 回押しトグル)。
-    pub input_mode: InputMode,
     pub paste_modifier: String,
     pub paste_key: String,
     pub sample_rate: u32,
@@ -205,6 +212,7 @@ pub struct Config {
     pub sound_start: bool,
     pub sound_finish: bool,
     pub sound_volume: f32,
+    pub sound_theme: SoundTheme,
     pub floating_bar: bool,
 
     // --- 音響前処理 ---
@@ -245,7 +253,6 @@ impl Default for Config {
             hotwords_score: 2.0,
 
             hotkey: "alt_r".to_string(),
-            input_mode: InputMode::PushToTalk,
             paste_modifier: "ctrl".to_string(),
             paste_key: "v".to_string(),
             sample_rate: 16_000,
@@ -261,6 +268,7 @@ impl Default for Config {
             sound_start: true,
             sound_finish: true,
             sound_volume: 0.55,
+            sound_theme: SoundTheme::Soft,
             floating_bar: true,
 
             highpass: false,
@@ -333,7 +341,6 @@ impl Config {
 pub struct Settings {
     pub model: String,
     pub hotkey: String,
-    pub input_mode: String,
     pub autostart: bool,
     pub device: Option<String>,
     pub language: String,
@@ -341,6 +348,7 @@ pub struct Settings {
     pub sound_start: bool,
     pub sound_finish: bool,
     pub sound_volume: f32,
+    pub sound_theme: String,
     pub floating_bar: bool,
 }
 
@@ -392,7 +400,6 @@ impl Settings {
         if !self.hotkey.trim().is_empty() {
             config.hotkey = self.hotkey.trim().to_string();
         }
-        config.input_mode = InputMode::parse(&self.input_mode);
         config.autostart = self.autostart;
         config.device = self.device.clone().filter(|value| !value.trim().is_empty());
         // 旧バージョンの `auto` は日本語誤爆の原因になるため引き継がない。
@@ -404,6 +411,7 @@ impl Settings {
         config.sound_start = self.sound_start;
         config.sound_finish = self.sound_finish;
         config.sound_volume = self.sound_volume.clamp(0.0, 1.0);
+        config.sound_theme = SoundTheme::parse(&self.sound_theme);
         config.floating_bar = self.floating_bar;
     }
 
@@ -412,7 +420,6 @@ impl Settings {
         Self {
             model: config.model.clone(),
             hotkey: config.hotkey.clone(),
-            input_mode: config.input_mode.as_str().to_string(),
             autostart: config.autostart,
             device: config.device.clone(),
             language: config.language.clone(),
@@ -420,6 +427,7 @@ impl Settings {
             sound_start: config.sound_start,
             sound_finish: config.sound_finish,
             sound_volume: config.sound_volume,
+            sound_theme: config.sound_theme.as_str().to_string(),
             floating_bar: config.floating_bar,
         }
     }
@@ -713,12 +721,12 @@ mod tests {
         let mut config = Config::default();
         let mut settings = Settings::from_config(&config);
         settings.model = "whisper-small".to_string();
-        settings.input_mode = "toggle".to_string();
+        settings.sound_theme = "chime".to_string();
         settings.sound_volume = 2.0;
         settings.num_threads = 99;
         settings.apply_to(&mut config);
         assert_eq!(config.model, "whisper-small");
-        assert_eq!(config.input_mode, InputMode::Toggle);
+        assert_eq!(config.sound_theme, SoundTheme::Chime);
         assert!((config.sound_volume - 1.0).abs() < f32::EPSILON);
         assert_eq!(config.num_threads, 16);
 

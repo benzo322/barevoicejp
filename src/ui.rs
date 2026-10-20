@@ -17,7 +17,7 @@ use tao::window::{Window, WindowBuilder};
 use wry::{WebView, WebViewBuilder};
 
 use crate::app::App;
-use crate::config::{self, MODEL_IDS, Settings};
+use crate::config::{self, MODEL_IDS, Settings, SoundTheme};
 use crate::models;
 use crate::overlay::Overlay;
 use crate::sound;
@@ -59,10 +59,10 @@ pub fn run(mut app: App) -> ! {
 
     let window = match WindowBuilder::new()
         .with_title("mkvoicejp — 設定")
-        .with_inner_size(LogicalSize::new(1060.0, 760.0))
-        .with_min_inner_size(LogicalSize::new(940.0, 660.0))
+        .with_inner_size(LogicalSize::new(1080.0, 800.0))
+        .with_min_inner_size(LogicalSize::new(1000.0, 720.0))
         .with_decorations(false)
-        .with_resizable(true)
+        .with_resizable(false)
         .with_visible(false)
         .with_background_color((243, 247, 252, 255))
         .build(&event_loop)
@@ -100,6 +100,7 @@ pub fn run(mut app: App) -> ! {
         app.level(),
         app.shared().visual_state(),
         Arc::clone(&enabled),
+        proxy.clone(),
     ) {
         Ok(overlay) => Some(overlay),
         Err(exc) => {
@@ -182,6 +183,7 @@ pub fn run(mut app: App) -> ! {
                 push_level(&webview, &app);
             }
             Event::UserEvent(UiEvent::Tick) => {
+                app.poll_hybrid();
                 if window.is_visible() {
                     push_level(&webview, &app);
                     if last_state.elapsed() >= Duration::from_millis(500) {
@@ -313,7 +315,12 @@ fn handle_ipc(
                 Some("start") => sound::Cue::Start,
                 _ => sound::Cue::Finish,
             };
-            sound::play(cue, settings.sound_volume);
+            let theme = value
+                .get("theme")
+                .and_then(Value::as_str)
+                .map(SoundTheme::parse)
+                .unwrap_or_else(|| SoundTheme::parse(&settings.sound_theme));
+            sound::play(theme, cue, settings.sound_volume);
         }
         "window" => match value.get("action").and_then(Value::as_str) {
             Some("minimize") => window.set_minimized(true),

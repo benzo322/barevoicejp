@@ -11,9 +11,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::audio::{AudioCapture, RingBuffer};
-use crate::config::{self, Config, InputMode};
+use crate::config::{self, Config};
 use crate::engine::Engine;
-use crate::state::{AppState, ReleaseOutcome, StateMachine, VisualState};
+use crate::state::{
+    AppState, HybridRelease, HybridState, PressOutcome, ReleaseOutcome, StateMachine, VisualState,
+};
 use crate::text::{self, TextFormatter, WordEntry};
 use crate::win;
 use crate::{debug, error, info, sound, warn};
@@ -30,6 +32,14 @@ struct Utterance {
     start_sample: u64,
     end_sample: u64,
     released_at: Instant,
+}
+
+/// 短い押下のあと、2回目の押下を待っている状態。
+#[derive(Clone, Copy)]
+struct PendingTap {
+    deadline: Instant,
+    released_at: Instant,
+    position: u64,
 }
 
 /// ワーカースレッドへの指示。
@@ -84,6 +94,8 @@ pub(crate) struct Shared {
     engine_building: AtomicBool,
     engine_error: Mutex<Option<String>>,
     visual: Arc<AtomicU8>,
+    hybrid: Mutex<HybridState>,
+    pending_tap: Mutex<Option<PendingTap>>,
 }
 
 impl Shared {
@@ -140,6 +152,8 @@ impl Shared {
             engine_building: AtomicBool::new(false),
             engine_error: Mutex::new(engine_error),
             visual: Arc::new(AtomicU8::new(VisualState::Idle as u8)),
+            hybrid: Mutex::new(HybridState::default()),
+            pending_tap: Mutex::new(None),
         })
     }
 
@@ -244,44 +258,107 @@ impl Shared {
         // 録音開始前に設定・辞書の変更を確認する。
         self.reload_if_changed();
 
+        let now = Instant::now();
+        self.poll_hybrid_at(now);
         let config = self.snapshot();
         let recording = lock(&self.state).state() == AppState::Recording;
-        if config.input_mode == InputMode::Toggle && recording {
-            self.stop_recording(Instant::now());
-            return;
-        }
-        if recording {
-            return;
-        }
+        let pending_deadline = lock(&self.pending_tap).as_ref().map(|tap| tap.deadline);
+        let outcome = lock(&self.hybrid).on_press(now, recording, pending_deadline);
 
-        let now = Instant::now();
-        let position = lock(&self.ring).position();
-        let pre_roll_samples =
-            (config.sample_rate as u64 * config.pre_roll_ms as u64) / config::MS_PER_SECOND;
-        let start_sample = position.saturating_sub(pre_roll_samples);
-        let repeat_guard = Duration::from_millis(config.repeat_guard_ms as u64);
-        let started = lock(&self.state).begin_recording(now, repeat_guard, start_sample);
-        if started {
-            info!("● 録音開始");
-            self.set_visual(VisualState::Recording);
-            if config.sound_start {
-                sound::play(sound::Cue::Start, config.sound_volume);
+        match outcome {
+            PressOutcome::Start => {
+                *lock(&self.pending_tap) = None;
+                let position = lock(&self.ring).position();
+                let pre_roll_samples =
+                    (config.sample_rate as u64 * config.pre_roll_ms as u64) / config::MS_PER_SECOND;
+                let start_sample = position.saturating_sub(pre_roll_samples);
+                let repeat_guard = Duration::from_millis(config.repeat_guard_ms as u64);
+                let started = lock(&self.state).begin_recording(now, repeat_guard, start_sample);
+                if started {
+                    info!("● 録音開始");
+                    self.set_visual(VisualState::Recording);
+                    if config.sound_start {
+                        sound::play(config.sound_theme, sound::Cue::Start, config.sound_volume);
+                    }
+                } else {
+                    debug!("キーリピート/直後の再押下を無視");
+                }
             }
-        } else {
-            debug!("キーリピート/直後の再押下を無視");
+            PressOutcome::ContinueToggle => {
+                *lock(&self.pending_tap) = None;
+                info!("● 2回押し: トグル録音を継続");
+                self.set_visual(VisualState::Recording);
+            }
+            PressOutcome::StopToggle => {
+                *lock(&self.pending_tap) = None;
+                let position = lock(&self.ring).position();
+                info!("■ 2回押し: 録音終了");
+                self.stop_recording_at(now, position, &config);
+            }
+            PressOutcome::Ignore => {}
         }
     }
 
     fn on_release(&self) {
-        if self.snapshot().input_mode == InputMode::Toggle {
-            return;
-        }
-        self.stop_recording(Instant::now());
-    }
-
-    fn stop_recording(&self, now: Instant) {
+        let now = Instant::now();
         let config = self.snapshot();
         let position = lock(&self.ring).position();
+        let recording = lock(&self.state).state() == AppState::Recording;
+        let cancelled = lock(&self.state).is_cancelled();
+        let outcome = lock(&self.hybrid).on_release(now, recording);
+
+        match outcome {
+            HybridRelease::Ignore => {}
+            HybridRelease::Stop => {
+                *lock(&self.pending_tap) = None;
+                self.stop_recording_at(now, position, &config);
+            }
+            HybridRelease::Pending(_) if cancelled => {
+                // Esc 済みの短押しは2回押し待ちに入らず、その場で破棄する。
+                *lock(&self.pending_tap) = None;
+                self.stop_recording_at(now, position, &config);
+            }
+            HybridRelease::Pending(deadline) => {
+                *lock(&self.pending_tap) = Some(PendingTap {
+                    deadline,
+                    released_at: now,
+                    position,
+                });
+                debug!("短押し: 2回押し待ち (300ms)");
+            }
+        }
+    }
+
+    /// 2回押し待ちの期限を確認する。UI の 50ms ティックから呼ぶ。
+    pub(crate) fn poll_hybrid(&self) {
+        self.poll_hybrid_at(Instant::now());
+    }
+
+    fn poll_hybrid_at(&self, now: Instant) {
+        let pending = {
+            let mut guard = lock(&self.pending_tap);
+            match *guard {
+                Some(tap) if now >= tap.deadline => {
+                    *guard = None;
+                    Some(tap)
+                }
+                _ => None,
+            }
+        };
+        let Some(pending) = pending else {
+            return;
+        };
+        if lock(&self.hybrid).toggle_active() {
+            return;
+        }
+        let config = self.snapshot();
+        if lock(&self.state).state() == AppState::Recording {
+            debug!("短押し: 2回押し待ちを確定");
+            self.stop_recording_at(pending.released_at, pending.position, &config);
+        }
+    }
+
+    fn stop_recording_at(&self, now: Instant, position: u64, config: &Config) {
         let tail_samples =
             (config.sample_rate as u64 * config.tail_grace_ms as u64) / config::MS_PER_SECOND;
         let min_duration = Duration::from_millis(config.min_duration_ms as u64);
@@ -325,6 +402,28 @@ impl Shared {
     }
 
     fn on_cancel(&self) {
+        let now = Instant::now();
+        let config = self.snapshot();
+        let toggle = lock(&self.hybrid).toggle_active();
+        let pending = lock(&self.pending_tap).take();
+
+        if toggle {
+            lock(&self.hybrid).end_toggle();
+            let position = lock(&self.ring).position();
+            info!("Esc: トグル録音を終了してペースト");
+            self.stop_recording_at(now, position, &config);
+            return;
+        }
+
+        if pending.is_some() {
+            lock(&self.hybrid).cancel_pending();
+            if lock(&self.state).discard_recording() {
+                self.set_visual(VisualState::Idle);
+                info!("× 破棄: 2回押し待ちを Esc でキャンセル");
+            }
+            return;
+        }
+
         if lock(&self.state).cancel() {
             self.set_visual(VisualState::Idle);
             info!("× キャンセル (Esc)");
@@ -508,6 +607,10 @@ impl App {
         self.shared.request_reconfigure();
     }
 
+    pub fn poll_hybrid(&self) {
+        self.shared.poll_hybrid();
+    }
+
     pub fn reload_dictionaries(&self) {
         self.shared.reload_dictionaries();
     }
@@ -660,7 +763,7 @@ fn process(engine: &Engine, shared: &Shared, item: &Utterance) {
     lock(&shared.state).finish_pasting();
     shared.settle_visual();
     if pasted && config.sound_finish {
-        sound::play(sound::Cue::Finish, config.sound_volume);
+        sound::play(config.sound_theme, sound::Cue::Finish, config.sound_volume);
     }
 }
 

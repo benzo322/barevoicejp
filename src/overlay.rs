@@ -8,29 +8,38 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::Instant;
 
+use tao::event_loop::EventLoopProxy;
 use tiny_skia::{
-    Color, FillRule, GradientStop, LinearGradient, Paint, Path, PathBuilder, Pixmap, Rect, Shader,
-    SpreadMode, Stroke, Transform,
+    Color, FillRule, GradientStop, LineCap, LineJoin, LinearGradient, Paint, Path, PathBuilder,
+    Pixmap, Rect, Shader, SpreadMode, Stroke, Transform,
 };
 use windows_sys::Win32::Foundation::{GetLastError, HWND, POINT, RECT, SIZE};
 use windows_sys::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
     CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HBITMAP,
-    HDC, HGDIOBJ, ReleaseDC, SelectObject,
+    HDC, HGDIOBJ, ReleaseDC, ScreenToClient, SelectObject,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW,
-    HTTRANSPARENT, HWND_TOPMOST, KillTimer, MA_NOACTIVATE, RegisterClassW, SPI_GETWORKAREA,
-    SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    SystemParametersInfoW, ULW_ALPHA, UpdateLayeredWindow, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_MOUSEACTIVATE, WM_NCHITTEST, WM_TIMER, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HTCLIENT,
+    HTTRANSPARENT, HWND_TOPMOST, IDC_ARROW, IDC_HAND, KillTimer, LoadCursorW, MA_NOACTIVATE,
+    RegisterClassW, SPI_GETWORKAREA, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW, ULW_ALPHA, UpdateLayeredWindow,
+    WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NCHITTEST, WM_TIMER, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::state::VisualState;
+use crate::ui::UiEvent;
 use crate::win::wide;
+
+/// `Win32_UI_Controls` を追加せずに使うための定数。
+const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const CLASS_NAME: &str = "MkVoiceJpOverlay";
 const TIMER_ID: usize = 1;
@@ -55,6 +64,7 @@ impl Overlay {
         level: Arc<AtomicU32>,
         visual: Arc<AtomicU8>,
         enabled: Arc<AtomicBool>,
+        proxy: EventLoopProxy<UiEvent>,
     ) -> Result<Self, String> {
         let class = wide(CLASS_NAME);
         let title = wide("mkvoicejp");
@@ -104,7 +114,7 @@ impl Overlay {
                 ));
             }
 
-            let ctx = Box::new(Ctx::new(hwnd, level, visual, enabled));
+            let ctx = Box::new(Ctx::new(hwnd, level, visual, enabled, proxy));
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, Box::into_raw(ctx) as isize);
             SetTimer(hwnd, TIMER_ID, 16, None);
             Ok(Self { hwnd })
@@ -126,6 +136,7 @@ struct Ctx {
     level: Arc<AtomicU32>,
     visual: Arc<AtomicU8>,
     enabled: Arc<AtomicBool>,
+    proxy: EventLoopProxy<UiEvent>,
     scale: f32,
     surface: Option<Surface>,
     pixmap: Option<Pixmap>,
@@ -135,6 +146,9 @@ struct Ctx {
     height: f32,
     heights: [f32; BAR_COUNT],
     visible: bool,
+    hover: bool,
+    hover_t: f32,
+    tracking_leave: bool,
     alpha: f32,
     last_state: VisualState,
     state_since: Instant,
@@ -146,12 +160,14 @@ impl Ctx {
         level: Arc<AtomicU32>,
         visual: Arc<AtomicU8>,
         enabled: Arc<AtomicBool>,
+        proxy: EventLoopProxy<UiEvent>,
     ) -> Self {
         let mut ctx = Self {
             hwnd,
             level,
             visual,
             enabled,
+            proxy,
             scale: 1.0,
             surface: None,
             pixmap: None,
@@ -160,6 +176,9 @@ impl Ctx {
             height: IDLE_HEIGHT,
             heights: [1.5; BAR_COUNT],
             visible: false,
+            hover: false,
+            hover_t: 0.0,
+            tracking_leave: false,
             alpha: 0.0,
             last_state: VisualState::Idle,
             state_since: Instant::now(),
@@ -201,6 +220,75 @@ impl Ctx {
         }
     }
 
+    fn hit_rect(&self) -> Rect {
+        let rect = content_rect(self.width, self.height, self.scale);
+        let pad_y = if self.height < 8.0 {
+            4.5 * self.scale
+        } else {
+            2.0 * self.scale
+        };
+        let pad_x = 3.0 * self.scale;
+        Rect::from_xywh(
+            rect.left() - pad_x,
+            rect.top() - pad_y,
+            rect.width() + pad_x * 2.0,
+            rect.height() + pad_y * 2.0,
+        )
+        .unwrap_or(rect)
+    }
+
+    fn is_close(&self, x: f32, y: f32) -> bool {
+        let rect = content_rect(self.width, self.height, self.scale);
+        let (cx, cy) = close_center(rect, self.scale);
+        let radius = 7.0 * self.scale;
+        let dx = x - cx;
+        let dy = y - cy;
+        dx * dx + dy * dy <= radius * radius
+    }
+
+    fn is_hit(&self, x: f32, y: f32) -> bool {
+        let hit = self.hit_rect();
+        let inside_rect =
+            x >= hit.left() && x <= hit.right() && y >= hit.top() && y <= hit.bottom();
+        inside_rect || self.is_close(x, y)
+    }
+
+    fn on_mouse_move(&mut self, x: f32, y: f32) {
+        let hit = self.is_hit(x, y);
+        self.hover = hit;
+        if hit && !self.tracking_leave {
+            let mut track = TRACKMOUSEEVENT {
+                cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: self.hwnd,
+                dwHoverTime: 0,
+            };
+            // SAFETY: hwnd はこのウィンドウ。track は有効な出力先。
+            unsafe {
+                TrackMouseEvent(&mut track);
+            }
+            self.tracking_leave = true;
+        }
+        // SAFETY: 標準カーソルを読み込むだけ。
+        unsafe {
+            let cursor = if hit { IDC_HAND } else { IDC_ARROW };
+            SetCursor(LoadCursorW(std::ptr::null_mut(), cursor));
+        }
+    }
+
+    fn on_mouse_leave(&mut self) {
+        self.hover = false;
+        self.tracking_leave = false;
+    }
+
+    fn on_click(&self, x: f32, y: f32) {
+        if self.is_close(x, y) {
+            let _ = self.proxy.send_event(UiEvent::Quit);
+        } else if self.is_hit(x, y) {
+            let _ = self.proxy.send_event(UiEvent::ShowSettings);
+        }
+    }
+
     fn tick(&mut self) {
         let state = VisualState::from_u8(self.visual.load(Ordering::Relaxed));
         if state != self.last_state {
@@ -208,6 +296,15 @@ impl Ctx {
             self.state_since = Instant::now();
         }
         let enabled = self.enabled.load(Ordering::Relaxed);
+        let hover_target = if enabled && self.visible && self.hover {
+            1.0
+        } else {
+            0.0
+        };
+        self.hover_t += (hover_target - self.hover_t) * 0.28;
+        if (hover_target - self.hover_t).abs() < 0.01 {
+            self.hover_t = hover_target;
+        }
 
         if !enabled {
             if self.visible {
@@ -310,7 +407,15 @@ impl Ctx {
         pixmap.fill(Color::TRANSPARENT);
 
         let scale = self.scale;
-        let rect = content_rect(self.width, self.height, scale);
+        let base_rect = content_rect(self.width, self.height, scale);
+        let lift = self.hover_t * 2.2 * scale;
+        let rect = Rect::from_xywh(
+            base_rect.left(),
+            base_rect.top() - lift,
+            base_rect.width(),
+            base_rect.height(),
+        )
+        .unwrap_or(base_rect);
         let gate = ((self.height - IDLE_HEIGHT) / (ACTIVE_HEIGHT - IDLE_HEIGHT)).clamp(0.0, 1.0);
 
         // 柔らかいアンビエントシャドウ。待機ラインではかなり薄くする。
@@ -407,6 +512,68 @@ impl Ctx {
             &self.level,
         );
 
+        if self.hover_t > 0.04 {
+            let (cx, cy) = close_center(rect, scale);
+            let radius = 6.5 * scale;
+            let mut circle = Paint::default();
+            circle.set_color(Color::from_rgba8(
+                255,
+                255,
+                255,
+                (180.0 * self.hover_t) as u8,
+            ));
+            if let Some(circle_path) = PathBuilder::from_circle(cx, cy, radius) {
+                pixmap.fill_path(
+                    &circle_path,
+                    &circle,
+                    FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+                let mut edge = Paint::default();
+                edge.set_color(Color::from_rgba8(
+                    148,
+                    163,
+                    184,
+                    (95.0 * self.hover_t) as u8,
+                ));
+                pixmap.stroke_path(
+                    &circle_path,
+                    &edge,
+                    &Stroke {
+                        width: 0.8 * scale,
+                        ..Stroke::default()
+                    },
+                    Transform::identity(),
+                    None,
+                );
+            }
+
+            let mut cross = PathBuilder::new();
+            let r = 2.6 * scale;
+            cross.move_to(cx - r, cy - r);
+            cross.line_to(cx + r, cy + r);
+            cross.move_to(cx + r, cy - r);
+            cross.line_to(cx - r, cy + r);
+            if let Some(cross) = cross.finish() {
+                let mut paint = Paint::default();
+                paint.set_color(Color::from_rgba8(71, 85, 105, (215.0 * self.hover_t) as u8));
+                paint.anti_alias = true;
+                pixmap.stroke_path(
+                    &cross,
+                    &paint,
+                    &Stroke {
+                        width: 1.25 * scale,
+                        line_cap: LineCap::Round,
+                        line_join: LineJoin::Round,
+                        ..Stroke::default()
+                    },
+                    Transform::identity(),
+                    None,
+                );
+            }
+        }
+
         let blend = BLENDFUNCTION {
             BlendOp: AC_SRC_OVER as u8,
             BlendFlags: 0,
@@ -434,8 +601,12 @@ impl Ctx {
 
         let center_y = rect.top() + rect.height() * 0.5;
         let center_x = rect.left() + rect.width() * 0.5;
-        let bar_width = 4.0 * scale;
-        let gap = 5.2 * scale;
+        // ピル内幅をほぼ使い切る。左右の余白は最小限にし、5本を均等に広げる。
+        let side_pad = (9.0 * scale).min(rect.width() * 0.08);
+        let available = (rect.width() - side_pad * 2.0).max(1.0);
+        let bar_width = (available / (BAR_COUNT as f32 * 1.8)).clamp(3.0 * scale, 6.0 * scale);
+        let gap = ((available - bar_width * BAR_COUNT as f32) / (BAR_COUNT as f32 - 1.0))
+            .max(2.0 * scale);
         let group_width = BAR_COUNT as f32 * bar_width + (BAR_COUNT as f32 - 1.0) * gap;
         let start_x = rect.left() + (rect.width() - group_width) * 0.5;
         let weights = [0.58, 0.84, 1.0, 0.78, 0.62];
@@ -681,6 +852,10 @@ impl Drop for Surface {
     }
 }
 
+fn close_center(rect: Rect, scale: f32) -> (f32, f32) {
+    (rect.right() + 9.0 * scale, rect.top() + rect.height() * 0.5)
+}
+
 fn pixel_size(scale: f32) -> (i32, i32) {
     (
         (WINDOW_WIDTH * scale).round() as i32,
@@ -818,8 +993,53 @@ unsafe extern "system" fn wnd_proc(
     wparam: usize,
     lparam: isize,
 ) -> isize {
+    let (mouse_x, mouse_y) = client_point(lparam);
     match message {
-        WM_NCHITTEST => return HTTRANSPARENT as isize,
+        WM_NCHITTEST => {
+            // WM_NCHITTEST の座標だけはスクリーン座標。クライアント座標へ直す。
+            let mut local = POINT {
+                x: mouse_x as i32,
+                y: mouse_y as i32,
+            };
+            // SAFETY: local は有効な出力先。
+            unsafe {
+                ScreenToClient(hwnd, &mut local);
+            }
+            // SAFETY: GWLP_USERDATA はこのウィンドウの Ctx を指す。
+            if let Some(ctx) = unsafe { ctx(hwnd) }
+                && ctx.enabled.load(Ordering::Relaxed)
+                && ctx.visible
+                && ctx.is_hit(local.x as f32, local.y as f32)
+            {
+                return HTCLIENT as isize;
+            }
+            if let Some(ctx) = unsafe { ctx(hwnd) } {
+                ctx.on_mouse_leave();
+            }
+            return HTTRANSPARENT as isize;
+        }
+        WM_MOUSEMOVE => {
+            // SAFETY: 同上。
+            if let Some(ctx) = unsafe { ctx(hwnd) } {
+                ctx.on_mouse_move(mouse_x, mouse_y);
+            }
+            return 0;
+        }
+        WM_MOUSELEAVE => {
+            // SAFETY: 同上。
+            if let Some(ctx) = unsafe { ctx(hwnd) } {
+                ctx.on_mouse_leave();
+            }
+            return 0;
+        }
+        WM_LBUTTONDOWN => return 0,
+        WM_LBUTTONUP => {
+            // SAFETY: 同上。
+            if let Some(ctx) = unsafe { ctx(hwnd) } {
+                ctx.on_click(mouse_x, mouse_y);
+            }
+            return 0;
+        }
         WM_MOUSEACTIVATE => return MA_NOACTIVATE as isize,
         WM_ERASEBKGND => return 1,
         WM_TIMER => {
@@ -854,6 +1074,12 @@ unsafe extern "system" fn wnd_proc(
     let _ = lparam;
     // SAFETY: 既定処理へ委譲する。
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+fn client_point(lparam: isize) -> (f32, f32) {
+    let x = (lparam & 0xFFFF) as u16 as i16 as f32;
+    let y = ((lparam >> 16) & 0xFFFF) as u16 as i16 as f32;
+    (x, y)
 }
 
 unsafe fn ctx(hwnd: HWND) -> Option<&'static mut Ctx> {

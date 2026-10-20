@@ -126,6 +126,11 @@ impl StateMachine {
         true
     }
 
+    /// Esc キャンセル待ちかどうか。
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+
     /// ホットキー離下を処理する。
     ///
     /// 録音中なら `tail_samples` を加えた範囲を返し、状態を `Processing` へ進める。
@@ -179,6 +184,132 @@ impl StateMachine {
         if matches!(self.state, AppState::Processing | AppState::Pasting) {
             self.state = AppState::Idle;
         }
+    }
+
+    /// キーが既に離されている録音を、その場で破棄する。
+    pub fn discard_recording(&mut self) -> bool {
+        if self.state == AppState::Recording {
+            self.state = AppState::Idle;
+            self.cancelled = false;
+            self.pressed_at = None;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// 2回押しと判定する時間窓。
+pub const DOUBLE_PRESS_WINDOW: Duration = Duration::from_millis(300);
+
+/// ホットキー押下時のハイブリッド判定。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PressOutcome {
+    /// 新規録音を開始する。
+    Start,
+    /// 2回目の押下。録音を継続し、トグル状態へ入る。
+    ContinueToggle,
+    /// トグル録音中の押下。録音を終了してペーストする。
+    StopToggle,
+    /// キーリピートなどで無視する。
+    Ignore,
+}
+
+/// ホットキー離下時のハイブリッド判定。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HybridRelease {
+    /// 何もしない。
+    Ignore,
+    /// 長押しの終了。即座に録音を確定する。
+    Stop,
+    /// 短い押下。2回目の押下を待つ。
+    Pending(Instant),
+}
+
+/// 長押しと2回押しを同時に受け付ける判定器。
+///
+/// 1回目の押下で録音を始め、300ms 未満で離した場合は 2回目の押下を
+/// 待つ。2回目が窓内に来ればトグル録音へ移行し、来なければ短い
+/// Push-to-Talk として確定する。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HybridState {
+    key_down: bool,
+    toggle_active: bool,
+    press_started: Option<Instant>,
+    suppress_release: bool,
+}
+
+impl HybridState {
+    pub fn on_press(
+        &mut self,
+        now: Instant,
+        recording: bool,
+        pending_deadline: Option<Instant>,
+    ) -> PressOutcome {
+        if self.key_down {
+            return PressOutcome::Ignore;
+        }
+        self.key_down = true;
+        self.suppress_release = false;
+
+        if self.toggle_active {
+            self.toggle_active = false;
+            self.press_started = Some(now);
+            self.suppress_release = true;
+            return PressOutcome::StopToggle;
+        }
+
+        if recording {
+            if pending_deadline.is_some_and(|deadline| now <= deadline) {
+                self.toggle_active = true;
+                self.press_started = Some(now);
+                return PressOutcome::ContinueToggle;
+            }
+            self.press_started = Some(now);
+            return PressOutcome::Ignore;
+        }
+
+        self.press_started = Some(now);
+        PressOutcome::Start
+    }
+
+    pub fn on_release(&mut self, now: Instant, recording: bool) -> HybridRelease {
+        if !self.key_down {
+            return HybridRelease::Ignore;
+        }
+        self.key_down = false;
+        if self.suppress_release {
+            self.suppress_release = false;
+            self.press_started = None;
+            return HybridRelease::Ignore;
+        }
+        let Some(started) = self.press_started.take() else {
+            return HybridRelease::Ignore;
+        };
+        if !recording || self.toggle_active {
+            return HybridRelease::Ignore;
+        }
+        if now.saturating_duration_since(started) >= DOUBLE_PRESS_WINDOW {
+            HybridRelease::Stop
+        } else {
+            HybridRelease::Pending(started + DOUBLE_PRESS_WINDOW)
+        }
+    }
+
+    pub fn toggle_active(&self) -> bool {
+        self.toggle_active
+    }
+
+    /// Esc でトグル録音を終了する。
+    pub fn end_toggle(&mut self) {
+        self.toggle_active = false;
+        self.press_started = None;
+        self.suppress_release = false;
+    }
+
+    /// 2回押し待ちを破棄して初期状態へ戻す。
+    pub fn cancel_pending(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -238,5 +369,74 @@ mod tests {
         assert_eq!(machine.state(), AppState::Pasting);
         machine.finish_pasting();
         assert_eq!(machine.state(), AppState::Idle);
+    }
+
+    #[test]
+    fn hybrid_hold_stops_on_release() {
+        let mut hybrid = HybridState::default();
+        let t0 = Instant::now();
+        assert_eq!(hybrid.on_press(t0, false, None), PressOutcome::Start);
+        assert_eq!(hybrid.on_release(t0 + ms(500), true), HybridRelease::Stop);
+        assert!(!hybrid.toggle_active());
+    }
+
+    #[test]
+    fn hybrid_short_tap_waits_and_double_press_toggles() {
+        let mut hybrid = HybridState::default();
+        let t0 = Instant::now();
+        assert_eq!(hybrid.on_press(t0, false, None), PressOutcome::Start);
+        let deadline = t0 + DOUBLE_PRESS_WINDOW;
+        assert_eq!(
+            hybrid.on_release(t0 + ms(80), true),
+            HybridRelease::Pending(deadline)
+        );
+
+        // 300ms 以内の2回目でトグル録音へ移行する。
+        assert_eq!(
+            hybrid.on_press(t0 + ms(200), true, Some(deadline)),
+            PressOutcome::ContinueToggle
+        );
+        assert!(hybrid.toggle_active());
+        assert_eq!(hybrid.on_release(t0 + ms(260), true), HybridRelease::Ignore);
+        assert!(hybrid.toggle_active());
+
+        // 3回目の押下でトグル録音を終了する。
+        assert_eq!(
+            hybrid.on_press(t0 + ms(1500), true, None),
+            PressOutcome::StopToggle
+        );
+        assert_eq!(
+            hybrid.on_release(t0 + ms(1520), true),
+            HybridRelease::Ignore
+        );
+        assert!(!hybrid.toggle_active());
+    }
+
+    #[test]
+    fn hybrid_second_press_after_deadline_is_a_new_start() {
+        let mut hybrid = HybridState::default();
+        let t0 = Instant::now();
+        assert_eq!(hybrid.on_press(t0, false, None), PressOutcome::Start);
+        let deadline = t0 + DOUBLE_PRESS_WINDOW;
+        assert_eq!(
+            hybrid.on_release(t0 + ms(80), true),
+            HybridRelease::Pending(deadline)
+        );
+        // 期限切れの待機は Shared 側で確定される。ここでは新しい押下として扱う。
+        assert_eq!(
+            hybrid.on_press(t0 + ms(400), false, None),
+            PressOutcome::Start
+        );
+    }
+
+    #[test]
+    fn cancelled_recording_can_be_discarded_without_release() {
+        let mut machine = StateMachine::new();
+        let t0 = Instant::now();
+        assert!(machine.begin_recording(t0, ms(250), 0));
+        assert!(machine.cancel());
+        assert!(machine.discard_recording());
+        assert_eq!(machine.state(), AppState::Idle);
+        assert!(!machine.discard_recording());
     }
 }

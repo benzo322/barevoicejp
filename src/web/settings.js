@@ -94,7 +94,7 @@ function setStatus() {
   const model = (state.models || []).find(item => item.id === state.settings.model);
   $("#heroModel").textContent = model ? model.name : state.settings.model;
   $("#heroHotkey").textContent = keyLabel(state.settings.hotkey);
-  $("#heroMode").textContent = state.settings.input_mode === "toggle" ? "2 回押しで切替" : "押して話す";
+  $("#heroMode").textContent = "長押し / 2回押し";
 
   const caption = {
     idle: "待機中 — ホットキーを押すと波形が動きます",
@@ -229,8 +229,8 @@ function renderControls() {
   if (!state) return;
   const settings = state.settings;
   setHotkeyBox();
-  $$("#modeSegment button").forEach(button => {
-    button.classList.toggle("active", button.dataset.mode === settings.input_mode);
+  $$("#themeGrid .theme-card").forEach(card => {
+    card.classList.toggle("selected", card.dataset.theme === settings.sound_theme);
   });
   $("#autostartToggle").classList.toggle("on", !!settings.autostart);
   $("#floatingToggle").classList.toggle("on", !!settings.floating_bar);
@@ -370,10 +370,23 @@ window.addEventListener("keydown", event => {
   save({ hotkey: key });
 }, true);
 
-$("#modeSegment").addEventListener("click", event => {
-  const button = event.target.closest("button[data-mode]");
-  if (!button) return;
-  save({ input_mode: button.dataset.mode });
+$("#themeGrid").addEventListener("click", event => {
+  const card = event.target.closest("[data-theme]");
+  if (!card) return;
+  const play = event.target.closest("[data-play]");
+  if (play) {
+    ipc({ cmd: "play_sound", kind: play.dataset.play, theme: card.dataset.theme });
+    return;
+  }
+  save({ sound_theme: card.dataset.theme });
+});
+
+$("#themeGrid").addEventListener("keydown", event => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  const card = event.target.closest("[data-theme]");
+  if (!card) return;
+  event.preventDefault();
+  save({ sound_theme: card.dataset.theme });
 });
 
 $("#autostartToggle").addEventListener("click", () => {
@@ -452,8 +465,6 @@ $("#volume").addEventListener("change", event => {
 
 $("#previewStart").addEventListener("click", () => ipc({ cmd: "play_sound", kind: "start" }));
 $("#previewFinish").addEventListener("click", () => ipc({ cmd: "play_sound", kind: "finish" }));
-$("#playStart").addEventListener("click", () => ipc({ cmd: "play_sound", kind: "start" }));
-$("#playFinish").addEventListener("click", () => ipc({ cmd: "play_sound", kind: "finish" }));
 
 $("#openWords").addEventListener("click", event => {
   event.preventDefault();
