@@ -1,9 +1,10 @@
 //! sherpa-onnx C-API の最小 FFI バインディングと推論エンジン。
 //!
 //! `include/sherpa-onnx/c-api/c-api.h` の構造体レイアウトをそのまま写し、
-//! SenseVoice と ReazonSpeech (transducer) のオフライン認識だけを扱う。
+//! SenseVoice / ReazonSpeech (transducer) / Whisper のオフライン認識を扱う。
 
 use std::ffi::{CStr, CString, c_char};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::{self, Config};
@@ -320,7 +321,7 @@ impl Drop for ResultGuard {
 // ---------------------------------------------------------------------------
 // エンジン
 // ---------------------------------------------------------------------------
-/// SenseVoice / ReazonSpeech のオフライン認識エンジン。
+/// SenseVoice / ReazonSpeech / Whisper のオフライン認識エンジン。
 pub struct Engine {
     recognizer: Recognizer,
     sample_rate: i32,
@@ -333,8 +334,10 @@ impl Engine {
         match config.model.as_str() {
             "sensevoice" => Self::sense_voice(config),
             "reazonspeech" => Self::reazonspeech(config),
+            "whisper-base" | "whisper-small" | "whisper-turbo" => Self::whisper(config),
             other => Err(format!(
-                "不明なモデル種別です: {other} (sensevoice / reazonspeech)"
+                "不明なモデル種別です: {other} \
+                 (sensevoice / reazonspeech / whisper-base / whisper-small / whisper-turbo)"
             )),
         }
     }
@@ -434,6 +437,36 @@ impl Engine {
             })?;
         crate::info!(
             "モデル準備完了 (ReazonSpeech / threads={}, provider={})",
+            config.num_threads,
+            config.provider
+        );
+        Ok(Self {
+            recognizer,
+            sample_rate: config.sample_rate as i32,
+            hotwords_supported: false,
+        })
+    }
+
+    fn whisper(config: &Config) -> Result<Self, String> {
+        let dir = config.model_dir_for(&config.model);
+        let (encoder, decoder, tokens) = resolve_whisper_files(&dir)?;
+        crate::info!(
+            "Whisper モデル読み込み: {} ({})",
+            encoder.display(),
+            config.model
+        );
+        let recognizer = create_whisper(config, &encoder, &decoder, &tokens).map_err(|exc| {
+            format!(
+                "Whisper モデルの初期化に失敗しました: {}\n\
+                     \x20 provider={} / num_threads={}\n\
+                     \x20 詳細: {exc}",
+                dir.display(),
+                config.provider,
+                config.num_threads
+            )
+        })?;
+        crate::info!(
+            "モデル準備完了 (Whisper / language=ja, task=transcribe, threads={}, provider={})",
             config.num_threads,
             config.provider
         );
@@ -544,6 +577,115 @@ fn resolve_reazonspeech_files(dir: &Path) -> Result<(PathBuf, PathBuf, PathBuf, 
     Ok((encoder, decoder, joiner, tokens))
 }
 
+/// Whisper の encoder / decoder / tokens を探す。
+///
+/// ファイル名は `*encoder*.onnx` / `*decoder*.onnx` を対象にし、
+/// int8 版があれば優先する。tokens は `tokens.txt` を優先し、
+/// `base-tokens.txt` のような接頭辞付きも受け付ける。
+fn resolve_whisper_files(dir: &Path) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+    let base = if dir.is_file() {
+        dir.parent().unwrap_or(Path::new(".")).to_path_buf()
+    } else {
+        dir.to_path_buf()
+    };
+    if !base.is_dir() {
+        return Err(format!(
+            "Whisper モデルディレクトリが見つかりません: {}\n\
+             次のコマンドで用意してください:\n{WHISPER_DOWNLOAD_HINT}\
+             または --model-dir /path/to/model-dir を指定してください。",
+            base.display()
+        ));
+    }
+
+    let encoder = find_whisper_model_file(&base, "encoder");
+    let decoder = find_whisper_model_file(&base, "decoder");
+    let tokens = find_whisper_tokens(&base);
+
+    let mut missing: Vec<&str> = Vec::with_capacity(3);
+    if encoder.is_none() {
+        missing.push("encoder (*encoder*.onnx)");
+    }
+    if decoder.is_none() {
+        missing.push("decoder (*decoder*.onnx)");
+    }
+    if tokens.is_none() {
+        missing.push("tokens (tokens.txt / *tokens.txt)");
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "Whisper モデルが見つかりません: {}\n\
+             不足ファイル: {}\n\
+             次のコマンドで用意してください:\n{WHISPER_DOWNLOAD_HINT}\
+             または --model-dir /path/to/model-dir を指定してください。",
+            base.display(),
+            missing.join(", ")
+        ));
+    }
+
+    Ok((
+        encoder.expect("encoder の存在を確認済み"),
+        decoder.expect("decoder の存在を確認済み"),
+        tokens.expect("tokens の存在を確認済み"),
+    ))
+}
+
+/// 指定キーワードを含む `.onnx` を、int8 → fp16 → 通常の順で選ぶ。
+fn find_whisper_model_file(dir: &Path, keyword: &str) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            name.ends_with(".onnx") && name.contains(keyword)
+        })
+        .collect();
+
+    candidates.sort_by(|left, right| {
+        let left_name = left.file_name().unwrap_or_default().to_string_lossy();
+        let right_name = right.file_name().unwrap_or_default().to_string_lossy();
+        whisper_file_rank(&left_name)
+            .cmp(&whisper_file_rank(&right_name))
+            .then_with(|| left_name.cmp(&right_name))
+    });
+    candidates.into_iter().next()
+}
+
+/// 量子化ファイルの優先順位。小さいほど優先。
+fn whisper_file_rank(name: &str) -> u8 {
+    if name.contains(".int8.") {
+        0
+    } else if name.contains(".fp16.") {
+        1
+    } else {
+        2
+    }
+}
+
+/// `tokens.txt` を最優先し、次に `*tokens.txt` を選ぶ。
+fn find_whisper_tokens(dir: &Path) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = fs::read_dir(dir)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            name.ends_with(".txt") && name.contains("tokens")
+        })
+        .collect();
+
+    candidates.sort_by(|left, right| {
+        let left_name = left.file_name().unwrap_or_default().to_string_lossy();
+        let right_name = right.file_name().unwrap_or_default().to_string_lossy();
+        (left_name != "tokens.txt")
+            .cmp(&(right_name != "tokens.txt"))
+            .then_with(|| left_name.cmp(&right_name))
+    });
+    candidates.into_iter().next()
+}
+
 const SENSEVOICE_DOWNLOAD_HINT: &str = "\
   mkdir -p models && cd models\n\
   curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2\n\
@@ -553,6 +695,15 @@ const REAZONSPEECH_DOWNLOAD_HINT: &str = "\
   mkdir -p models && cd models\n\
   curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2\n\
   tar xf sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2\n";
+
+const WHISPER_DOWNLOAD_HINT: &str = "\
+  mkdir -p models && cd models\n\
+  curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-base.tar.bz2\n\
+  tar xf sherpa-onnx-whisper-base.tar.bz2\n\
+  curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-small.tar.bz2\n\
+  tar xf sherpa-onnx-whisper-small.tar.bz2\n\
+  curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-large-v3-turbo.tar.bz2\n\
+  tar xf sherpa-onnx-whisper-large-v3-turbo.tar.bz2\n";
 
 fn path_string(path: &Path) -> Result<CString, String> {
     CString::new(path.to_string_lossy().as_bytes())
@@ -644,6 +795,38 @@ fn create_transducer(
     Recognizer::from_raw(recognizer)
 }
 
+/// Whisper 用の C 設定を組み立てて認識器を作る。
+fn create_whisper(
+    config: &Config,
+    encoder: &Path,
+    decoder: &Path,
+    tokens: &Path,
+) -> Result<Recognizer, String> {
+    let encoder = path_string(encoder)?;
+    let decoder = path_string(decoder)?;
+    let tokens = path_string(tokens)?;
+    let provider = text_string(&config.provider)?;
+    let language = text_string("ja")?;
+    let task = text_string("transcribe")?;
+
+    let mut cfg = empty_config(config);
+    cfg.model_config.whisper = SherpaOnnxOfflineWhisperModelConfig {
+        encoder: encoder.as_ptr(),
+        decoder: decoder.as_ptr(),
+        language: language.as_ptr(),
+        task: task.as_ptr(),
+        tail_paddings: 0,
+        enable_token_timestamps: 0,
+        enable_segment_timestamps: 0,
+    };
+    cfg.model_config.tokens = tokens.as_ptr();
+    cfg.model_config.provider = provider.as_ptr();
+
+    // SAFETY: cfg のポインタはすべて生存中の CString を指している。
+    let recognizer = unsafe { SherpaOnnxCreateOfflineRecognizer(&cfg) };
+    Recognizer::from_raw(recognizer)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,6 +838,7 @@ mod tests {
         assert_eq!(size_of::<SherpaOnnxOfflineRecognizerConfig>(), 608);
         assert_eq!(size_of::<SherpaOnnxOfflineModelConfig>(), 504);
         assert_eq!(size_of::<SherpaOnnxOfflineSenseVoiceModelConfig>(), 24);
+        assert_eq!(size_of::<SherpaOnnxOfflineWhisperModelConfig>(), 48);
         assert_eq!(size_of::<SherpaOnnxFeatureConfig>(), 8);
         assert_eq!(size_of::<SherpaOnnxHomophoneReplacerConfig>(), 24);
         assert_eq!(
@@ -665,6 +849,7 @@ mod tests {
             offset_of!(SherpaOnnxOfflineRecognizerConfig, lm_config),
             512
         );
+        assert_eq!(offset_of!(SherpaOnnxOfflineModelConfig, whisper), 40);
         assert_eq!(offset_of!(SherpaOnnxOfflineModelConfig, sense_voice), 152);
         assert_eq!(offset_of!(SherpaOnnxOfflineModelConfig, qwen3_asr), 408);
     }
@@ -706,6 +891,46 @@ mod tests {
             text,
             "うちの中学は弁当制で持っていけない場合は五十円の学校販売のパンを買う"
         );
+    }
+
+    #[test]
+    fn resolves_whisper_files_prefers_int8_and_prefixed_tokens() {
+        let dir =
+            std::env::temp_dir().join(format!("mkvoicejp-whisper-resolve-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("一時ディレクトリ作成");
+        for name in [
+            "base-encoder.onnx",
+            "base-encoder.int8.onnx",
+            "base-decoder.onnx",
+            "base-decoder.int8.onnx",
+            "base-tokens.txt",
+        ] {
+            fs::write(dir.join(name), b"").expect("ダミーファイル作成");
+        }
+
+        let (encoder, decoder, tokens) = resolve_whisper_files(&dir).expect("Whisper ファイル解決");
+        assert!(encoder.ends_with("base-encoder.int8.onnx"));
+        assert!(decoder.ends_with("base-decoder.int8.onnx"));
+        assert!(tokens.ends_with("base-tokens.txt"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore = "実モデルと sherpa-onnx DLL が必要"]
+    fn transcribes_whisper_base_wav() {
+        let config = Config {
+            model: "whisper-base".to_string(),
+            ..Config::default()
+        };
+        let engine = Engine::build(&config).expect("エンジン初期化");
+        let wav = std::fs::read(config.sensevoice_model_dir.join("test_wavs/ja.wav"))
+            .expect("ja.wav を読めません");
+        let samples = parse_wav(&wav);
+        let text = engine.transcribe(&samples);
+        eprintln!("text={text:?}");
+        assert!(!text.trim().is_empty());
     }
 
     fn parse_wav(bytes: &[u8]) -> Vec<f32> {

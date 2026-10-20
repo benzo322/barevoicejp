@@ -8,6 +8,9 @@ use std::path::PathBuf;
 // モデルディレクトリ名。`models/` 配下の展開先と一致させる。
 const SENSEVOICE_DIR_NAME: &str = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17";
 const REAZONSPEECH_DIR_NAME: &str = "sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01";
+const WHISPER_BASE_DIR_NAME: &str = "sherpa-onnx-whisper-base";
+const WHISPER_SMALL_DIR_NAME: &str = "sherpa-onnx-whisper-small";
+const WHISPER_TURBO_DIR_NAME: &str = "sherpa-onnx-whisper-large-v3-turbo";
 
 // ---------------------------------------------------------------------------
 // 内部チューニング定数
@@ -88,6 +91,9 @@ pub struct Config {
     pub model_dir_override: Option<PathBuf>,
     pub sensevoice_model_dir: PathBuf,
     pub reazonspeech_model_dir: PathBuf,
+    pub whisper_base_model_dir: PathBuf,
+    pub whisper_small_model_dir: PathBuf,
+    pub whisper_turbo_model_dir: PathBuf,
     pub num_threads: i32,
     pub provider: String,
     pub language: String,
@@ -140,6 +146,9 @@ impl Default for Config {
             model_dir_override: None,
             sensevoice_model_dir: default_model_dir(SENSEVOICE_DIR_NAME),
             reazonspeech_model_dir: default_model_dir(REAZONSPEECH_DIR_NAME),
+            whisper_base_model_dir: default_model_dir(WHISPER_BASE_DIR_NAME),
+            whisper_small_model_dir: default_model_dir(WHISPER_SMALL_DIR_NAME),
+            whisper_turbo_model_dir: default_model_dir(WHISPER_TURBO_DIR_NAME),
             num_threads: 2,
             provider: "cpu".to_string(),
             language: "auto".to_string(),
@@ -206,6 +215,9 @@ impl Config {
         }
         match model {
             "reazonspeech" => self.reazonspeech_model_dir.clone(),
+            "whisper-base" => self.whisper_base_model_dir.clone(),
+            "whisper-small" => self.whisper_small_model_dir.clone(),
+            "whisper-turbo" => self.whisper_turbo_model_dir.clone(),
             _ => self.sensevoice_model_dir.clone(),
         }
     }
@@ -250,17 +262,18 @@ pub struct Cli {
 pub const HELP: &str = "\
 使い方: mkvoicejp [オプション]
 
-SenseVoice / ReazonSpeech を使う Push-to-Talk 音声入力 (Windows)
+SenseVoice / ReazonSpeech / Whisper を使う Push-to-Talk 音声入力 (Windows)
 
 オプション:
   -h, --help                 このヘルプを表示して終了
-  --model {sensevoice,reazonspeech}
-                             推論モデル (既定: sensevoice)
+  --model NAME               推論モデル: sensevoice (既定), reazonspeech,
+                             whisper-base, whisper-small, whisper-turbo
   --model-dir DIR            選択したモデルのディレクトリ
   --hotkey KEY               押している間だけ録音するキー (既定: alt_r)
   --paste-modifier MOD       貼り付けの修飾キー (既定: ctrl)
   --device SPEC              入力デバイス番号または名前の一部
   --language LANG            SenseVoice の認識言語 (auto/ja/en/zh/ko/yue)
+                             Whisper は ja 固定
   --num-threads N            CPU 推論スレッド数 (既定: 2)
   --provider NAME            ONNX Runtime provider (既定: cpu)
   --hotwords-score F         ホットワードスコア (既定: 2.0)
@@ -303,9 +316,17 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String
             "-h" | "--help" => cli.help = true,
             "--model" => {
                 let value = take_value("--model")?;
-                if value != "sensevoice" && value != "reazonspeech" {
+                const MODELS: [&str; 5] = [
+                    "sensevoice",
+                    "reazonspeech",
+                    "whisper-base",
+                    "whisper-small",
+                    "whisper-turbo",
+                ];
+                if !MODELS.contains(&value.as_str()) {
                     return Err(format!(
-                        "--model は sensevoice / reazonspeech のいずれかです: {value}"
+                        "--model は sensevoice / reazonspeech / whisper-base / \
+                         whisper-small / whisper-turbo のいずれかです: {value}"
                     ));
                 }
                 cli.model = Some(value);
@@ -460,5 +481,26 @@ mod tests {
 
         config.apply_cli(&parse_args(["--fuzzy".to_string()]).expect("--fuzzy"));
         assert!(config.fuzzy);
+    }
+
+    #[test]
+    fn accepts_whisper_models_and_resolves_dirs() {
+        for model in ["whisper-base", "whisper-small", "whisper-turbo"] {
+            let mut config = Config::default();
+            config.apply_cli(
+                &parse_args(["--model".to_string(), model.to_string()]).expect("有効なモデル"),
+            );
+            assert_eq!(config.model, model);
+            assert!(config.model_dir_for(model).ends_with(model_dir_name(model)));
+        }
+    }
+
+    fn model_dir_name(model: &str) -> &'static str {
+        match model {
+            "whisper-base" => WHISPER_BASE_DIR_NAME,
+            "whisper-small" => WHISPER_SMALL_DIR_NAME,
+            "whisper-turbo" => WHISPER_TURBO_DIR_NAME,
+            _ => "",
+        }
     }
 }
