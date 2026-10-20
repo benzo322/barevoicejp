@@ -78,7 +78,7 @@ pub(crate) fn run(mut app: App) -> ! {
         }
     };
 
-    center_window(&window);
+    place_window(&window);
 
     let ipc_proxy = proxy.clone();
     let script: &'static str = include_str!("web/settings.js");
@@ -212,17 +212,17 @@ pub(crate) fn run(mut app: App) -> ! {
     });
 }
 
-/// 設定画面を中央へ出し、最前面へ持ってくる。
+/// 設定画面をフローティングバーの直上へ出し、最前面へ持ってくる。
 fn show_window(window: &Window) {
     window.set_minimized(false);
-    center_window(window);
+    place_window(window);
     window.set_visible(true);
     window.set_focus();
     win::force_foreground(window.hwnd() as *mut core::ffi::c_void);
 }
 
-/// プライマリディスプレイのワークエリア中央へ設定画面を移動する。
-fn center_window(window: &Window) {
+/// プライマリディスプレイの下端寄り (フローティングバーの直上) へ設定画面を移動する。
+fn place_window(window: &Window) {
     let mut work: RECT = unsafe { std::mem::zeroed() };
     // SAFETY: work は有効な出力先。SPI_GETWORKAREA はプライマリのワークエリアを返す。
     let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, (&raw mut work).cast(), 0) };
@@ -231,9 +231,10 @@ fn center_window(window: &Window) {
     }
     let size = window.outer_size();
     let width = work.right - work.left;
-    let height = work.bottom - work.top;
     let x = work.left + (width - size.width as i32) / 2;
-    let y = work.top + (height - size.height as i32) / 2;
+    // フローティングバーの可視部分 (下端から約 28.5 論理 px) のすぐ上に来るよう 38 論理 px 空ける。
+    let gap = (38.0 * window.scale_factor()).round() as i32;
+    let y = (work.bottom - size.height as i32 - gap).max(work.top);
     window.set_outer_position(PhysicalPosition::new(x, y));
 }
 
