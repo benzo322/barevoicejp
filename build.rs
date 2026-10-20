@@ -7,13 +7,32 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
-        println!("cargo:warning=mkvoicejp は Windows 専用です (sherpa-onnx DLL をリンクしません)");
+        println!("cargo:warning=BAREVoiceJP は Windows 専用です (sherpa-onnx DLL をリンクしません)");
         return;
     }
 
     let manifest = PathBuf::from(
         std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR がありません"),
     );
+
+    // exe 本体のアイコン (エクスプローラー・タスクバー用)。
+    let icon = manifest.join("app.ico");
+    if !icon.is_file() {
+        panic!("アプリアイコンが見つかりません: {}", icon.display());
+    }
+    println!("cargo:rerun-if-changed={}", icon.display());
+    let mut resource = winres::WindowsResource::new();
+    resource.set_icon(
+        icon.to_str()
+            .expect("app.ico のパスが UTF-8 ではありません"),
+    );
+    resource.set("FileDescription", "BAREVoiceJP");
+    resource.set("ProductName", "BAREVoiceJP");
+    resource.set("OriginalFilename", "BAREVoiceJP.exe");
+    resource.set("InternalName", "BAREVoiceJP");
+    resource
+        .compile()
+        .unwrap_or_else(|exc| panic!("アイコンリソースを埋め込めません: {exc}"));
     let root = manifest.join("sherpa-onnx-v1.13.8-win-x64-shared-MD-Release");
     let lib_dir = root.join("lib");
     let import_lib = lib_dir.join("sherpa-onnx-c-api.lib");

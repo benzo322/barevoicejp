@@ -68,7 +68,7 @@ fn main() {
     }
 
     info!(
-        "プラットフォーム: Windows / ホットキー={} / 貼り付け={}+{}",
+        "BAREVoiceJP / プラットフォーム: Windows / ホットキー={} / 貼り付け={}+{}",
         config.hotkey, config.paste_modifier, config.paste_key
     );
     if config.paste_key != "v" || !config.paste_modifier.eq_ignore_ascii_case("ctrl") {

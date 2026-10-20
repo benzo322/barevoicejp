@@ -338,7 +338,7 @@ function animatePreview() {
   requestAnimationFrame(animatePreview);
 }
 
-window.__mkvoice = {
+window.__barevoice = {
   apply(next) {
     state = next;
     render();

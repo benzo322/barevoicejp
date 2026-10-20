@@ -1,8 +1,11 @@
 [package]
-name = "mkvoicejp"
+name = "BAREVoiceJP"
 version = "0.1.0"
 edition = "2024"
 description = "超低遅延 Push-to-Talk 音声入力 (SenseVoice / sherpa-onnx)"
+
+[build-dependencies]
+winres = "0.1"
 
 [dependencies]
 bzip2 = "0.6"

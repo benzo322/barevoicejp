@@ -473,7 +473,7 @@ pub(crate) struct Cli {
 
 /// CLI ヘルプ。`--help` でそのまま表示する。
 pub(crate) const HELP: &str = "\
-使い方: mkvoicejp [オプション]
+使い方: BAREVoiceJP [オプション]
 
 SenseVoice / ReazonSpeech / Whisper を使う Push-to-Talk 音声入力 (Windows)
 

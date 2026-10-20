@@ -155,7 +155,7 @@ pub(crate) fn play(theme: SoundTheme, cue: Cue, volume: f32) {
         return;
     }
     std::thread::Builder::new()
-        .name("mkvoicejp-sound".to_string())
+        .name("BAREVoiceJP-sound".to_string())
         .spawn(move || {
             let host = cpal::default_host();
             let Some(device) = host.default_output_device() else {

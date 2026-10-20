@@ -896,7 +896,7 @@ mod tests {
     #[test]
     fn resolves_whisper_files_prefers_int8_and_prefixed_tokens() {
         let dir =
-            std::env::temp_dir().join(format!("mkvoicejp-whisper-resolve-{}", std::process::id()));
+            std::env::temp_dir().join(format!("BAREVoiceJP-whisper-resolve-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("一時ディレクトリ作成");
         for name in [

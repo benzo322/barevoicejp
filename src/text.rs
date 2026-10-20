@@ -975,7 +975,7 @@ mod tests {
             .expect("時刻")
             .as_nanos();
         let dir =
-            std::env::temp_dir().join(format!("mkvoicejp-words-{}-{unique}", std::process::id()));
+            std::env::temp_dir().join(format!("BAREVoiceJP-words-{}-{unique}", std::process::id()));
         fs::create_dir_all(&dir).expect("一時ディレクトリ");
         let path = dir.join("words.txt");
         fs::write(&path, "# keep\nGitHub : ギットハブ\n").expect("初期辞書");

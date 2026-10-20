@@ -41,7 +41,7 @@ use crate::win::wide;
 /// `Win32_UI_Controls` を追加せずに使うための定数。
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
-const CLASS_NAME: &str = "MkVoiceJpOverlay";
+const CLASS_NAME: &str = "BAREVoiceJPOverlay";
 const TIMER_ID: usize = 1;
 /// 影を含めたウィンドウの論理サイズ。
 const WINDOW_WIDTH: f32 = 170.0;
@@ -78,7 +78,7 @@ impl Overlay {
         proxy: EventLoopProxy<UiEvent>,
     ) -> Result<Self, String> {
         let class = wide(CLASS_NAME);
-        let title = wide("mkvoicejp");
+        let title = wide("BAREVoiceJP");
         // SAFETY: クラス名は NUL 終端で、コールバックは 'static 関数。
         unsafe {
             let instance = GetModuleHandleW(std::ptr::null());

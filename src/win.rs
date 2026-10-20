@@ -116,7 +116,7 @@ pub(crate) fn hide_console() {
 }
 
 const AUTOSTART_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const AUTOSTART_VALUE: &str = "mkvoicejp";
+const AUTOSTART_VALUE: &str = "BAREVoiceJP";
 
 /// 自動起動がレジストリに登録されているか。
 pub(crate) fn autostart_enabled() -> bool {

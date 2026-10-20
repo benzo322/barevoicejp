@@ -61,7 +61,7 @@ pub(crate) fn run(mut app: App) -> ! {
     let proxy = event_loop.create_proxy();
 
     let window = match WindowBuilder::new()
-        .with_title("mkvoicejp — 設定")
+        .with_title("BAREVoiceJP — 設定")
         .with_inner_size(LogicalSize::new(1080.0, 800.0))
         .with_min_inner_size(LogicalSize::new(1000.0, 720.0))
         .with_decorations(false)
@@ -120,7 +120,7 @@ pub(crate) fn run(mut app: App) -> ! {
 
     let tick_proxy = proxy.clone();
     std::thread::Builder::new()
-        .name("mkvoicejp-ui-tick".to_string())
+        .name("BAREVoiceJP-ui-tick".to_string())
         .spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_millis(50));
@@ -446,7 +446,7 @@ fn open_in_notepad(path: &str, notice: &mut Option<Notice>, notice_id: &mut u64)
 fn push_level(webview: &WebView, app: &App) {
     let level = f32::from_bits(app.level().load(Ordering::Relaxed));
     if let Err(exc) = webview.evaluate_script(&format!(
-        "window.__mkvoice && window.__mkvoice.level({level:.4});"
+        "window.__barevoice && window.__barevoice.level({level:.4});"
     )) {
         crate::debug!("入力レベルを送れません: {exc}");
     }
@@ -460,7 +460,7 @@ fn push_state(webview: &WebView, app: &App, settings: &Settings, notice: &Option
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029");
     if let Err(exc) = webview.evaluate_script(&format!(
-        "window.__mkvoice && window.__mkvoice.apply({text});"
+        "window.__barevoice && window.__barevoice.apply({text});"
     )) {
         crate::debug!("設定状態を送れません: {exc}");
     }
