@@ -111,10 +111,19 @@ function setHotkeyBox() {
   $("#hotkeyHint").textContent = "クリックしてキーを押してください";
 }
 
+function friendlyModelError(error) {
+  const text = String(error || "");
+  if (/curl\s+-LO|https:\/\/github\.com\/k2-fsa/.test(text)) {
+    return "このモデルは未ダウンロードです。下の「ダウンロード」ボタンから追加してください。";
+  }
+  return text;
+}
+
 function renderModels() {
   const grid = $("#modelGrid");
   if (!state) return;
-  const signature = JSON.stringify(state.models || []);
+  // 選択モデルも再描画条件に含める。これが無いと選択枠が移動しない。
+  const signature = `${state.settings.model}|${JSON.stringify(state.models || [])}`;
   if (signature !== lastModels) {
     lastModels = signature;
     grid.innerHTML = (state.models || []).map(model => {
@@ -171,7 +180,7 @@ function renderModels() {
     banner.classList.add("show");
     $("#modelBannerText").textContent = state.engine.building
       ? "モデルを読み込んでいます…"
-      : state.engine.error;
+      : friendlyModelError(state.engine.error);
   } else {
     banner.classList.remove("show");
   }
@@ -441,7 +450,14 @@ $("#modelGrid").addEventListener("click", event => {
     return;
   }
   const card = event.target.closest("[data-model]");
-  if (card && state && card.dataset.model !== state.settings.model) {
+  if (!card || !state) return;
+  const model = (state.models || []).find(item => item.id === card.dataset.model);
+  if (!model) return;
+  if (!model.installed) {
+    toast("このモデルは未ダウンロードです。右下の「ダウンロード」ボタンを押してください", "info");
+    return;
+  }
+  if (card.dataset.model !== state.settings.model) {
     save({ model: card.dataset.model });
   }
 });

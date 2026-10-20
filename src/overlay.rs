@@ -46,9 +46,12 @@ const TIMER_ID: usize = 1;
 /// 影を含めたウィンドウの論理サイズ。
 const WINDOW_WIDTH: f32 = 170.0;
 const WINDOW_HEIGHT: f32 = 56.0;
-/// 待機時の細いライン。
-const IDLE_WIDTH: f32 = 70.0;
-const IDLE_HEIGHT: f32 = 3.0;
+/// 待機時の短いライン。
+const IDLE_WIDTH: f32 = 48.0;
+const IDLE_HEIGHT: f32 = 5.0;
+/// 待機ラインにホバーした時のサイズ。
+const IDLE_HOVER_WIDTH: f32 = 65.0;
+const IDLE_HOVER_HEIGHT: f32 = 8.0;
 /// 録音・推論時の極小ピル。
 const ACTIVE_WIDTH: f32 = 130.0;
 const ACTIVE_HEIGHT: f32 = 28.0;
@@ -56,8 +59,8 @@ const ACTIVE_HEIGHT: f32 = 28.0;
 const BAR_COUNT: usize = 24;
 /// バー間の目標ギャップ (論理 px)。
 const BAR_GAP: f32 = 2.25;
-/// ピル左右の最小余白 (論理 px)。
-const BAR_SIDE_PAD: f32 = 3.0;
+/// ピル左右の波形余白 (論理 px)。丸いカーブの内側に収める。
+const BAR_SIDE_PAD: f32 = 12.0;
 /// バーの最大高さ (論理 px)。
 const BAR_MAX_HEIGHT: f32 = 20.5;
 
@@ -351,8 +354,18 @@ impl Ctx {
 
         self.alpha = (self.alpha + 0.16).min(1.0);
         let active = state != VisualState::Idle;
-        let target_width = if active { ACTIVE_WIDTH } else { IDLE_WIDTH };
-        let target_height = if active { ACTIVE_HEIGHT } else { IDLE_HEIGHT };
+        // 待機中だけホバーで一回り膨らませ、クリック可能であることを示す。
+        let idle_hover = if active { 0.0 } else { self.hover_t };
+        let target_width = if active {
+            ACTIVE_WIDTH
+        } else {
+            IDLE_WIDTH + (IDLE_HOVER_WIDTH - IDLE_WIDTH) * idle_hover
+        };
+        let target_height = if active {
+            ACTIVE_HEIGHT
+        } else {
+            IDLE_HEIGHT + (IDLE_HOVER_HEIGHT - IDLE_HEIGHT) * idle_hover
+        };
         let width_speed = if target_width > self.width {
             0.34
         } else {
@@ -425,9 +438,11 @@ impl Ctx {
         .unwrap_or(base_rect);
         let gate = ((self.height - IDLE_HEIGHT) / (ACTIVE_HEIGHT - IDLE_HEIGHT)).clamp(0.0, 1.0);
 
-        // 柔らかいアンビエントシャドウ。待機ラインではかなり薄くする。
+        // 柔らかいアンビエントシャドウ。待機ラインは白背景でも見えるよう濃めにする。
+        let idle = (1.0 - gate).powf(1.4);
         for (index, path) in shadow_paths(rect, scale).iter().enumerate() {
-            let alpha = ((2.0 + index as f32 * 1.5) * (0.28 + 0.72 * gate)) as u8;
+            let alpha = ((2.0 + index as f32 * 1.5) * (0.28 + 0.72 * gate)
+                + (5.0 + index as f32 * 2.2) * idle) as u8;
             let mut paint = Paint::default();
             paint.set_color(Color::from_rgba8(30, 41, 59, alpha));
             pixmap.fill_path(path, &paint, FillRule::Winding, Transform::identity(), None);
@@ -455,10 +470,10 @@ impl Ctx {
 
             let mut edge = Paint::default();
             edge.set_color(Color::from_rgba8(
-                186,
-                210,
-                236,
-                (100.0 + 80.0 * gate) as u8,
+                (150.0 + 36.0 * gate) as u8,
+                (172.0 + 34.0 * gate) as u8,
+                (198.0 + 33.0 * gate) as u8,
+                (120.0 + 60.0 * gate) as u8,
             ));
             pixmap.stroke_path(
                 &pill,
@@ -884,12 +899,15 @@ fn pixel_size(scale: f32) -> (i32, i32) {
 
 fn content_rect(width: f32, height: f32, scale: f32) -> Rect {
     let width = (width * scale).max(1.0);
-    let height = (height * scale).max(1.0);
+    let height_px = (height * scale).max(1.0);
+    // 待機ラインは画面下端寄りに置く。ピルへ展開するにつれて中央へ戻す。
+    let gate = ((height - IDLE_HEIGHT) / (ACTIVE_HEIGHT - IDLE_HEIGHT)).clamp(0.0, 1.0);
+    let drop = (1.0 - gate) * 8.0 * scale;
     Rect::from_xywh(
         (WINDOW_WIDTH * scale - width) * 0.5,
-        (WINDOW_HEIGHT * scale - height) * 0.5,
+        (WINDOW_HEIGHT * scale - height_px) * 0.5 + drop,
         width,
-        height,
+        height_px,
     )
     .unwrap_or_else(|| Rect::from_xywh(0.0, 0.0, 1.0, 1.0).expect("1x1 の有効な矩形"))
 }
