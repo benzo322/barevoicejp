@@ -52,7 +52,14 @@ const IDLE_HEIGHT: f32 = 3.0;
 /// 録音・推論時の極小ピル。
 const ACTIVE_WIDTH: f32 = 130.0;
 const ACTIVE_HEIGHT: f32 = 28.0;
-const BAR_COUNT: usize = 5;
+/// ピル内に高密度で並べるバー本数。
+const BAR_COUNT: usize = 24;
+/// バー間の目標ギャップ (論理 px)。
+const BAR_GAP: f32 = 2.25;
+/// ピル左右の最小余白 (論理 px)。
+const BAR_SIDE_PAD: f32 = 3.0;
+/// バーの最大高さ (論理 px)。
+const BAR_MAX_HEIGHT: f32 = 20.5;
 
 /// マイクレベル・表示状態・有効フラグを共有してバーを作る。
 pub struct Overlay {
@@ -174,7 +181,7 @@ impl Ctx {
             unit_circle: PathBuilder::from_circle(0.0, 0.0, 1.0),
             width: IDLE_WIDTH,
             height: IDLE_HEIGHT,
-            heights: [1.5; BAR_COUNT],
+            heights: [2.2; BAR_COUNT],
             visible: false,
             hover: false,
             hover_t: 0.0,
@@ -601,36 +608,45 @@ impl Ctx {
 
         let center_y = rect.top() + rect.height() * 0.5;
         let center_x = rect.left() + rect.width() * 0.5;
-        // ピル内幅をほぼ使い切る。左右の余白は最小限にし、5本を均等に広げる。
-        let side_pad = (9.0 * scale).min(rect.width() * 0.08);
-        let available = (rect.width() - side_pad * 2.0).max(1.0);
-        let bar_width = (available / (BAR_COUNT as f32 * 1.8)).clamp(3.0 * scale, 6.0 * scale);
-        let gap = ((available - bar_width * BAR_COUNT as f32) / (BAR_COUNT as f32 - 1.0))
-            .max(2.0 * scale);
+        // 24本をほぼ隙間なく並べる。ピルがまだ細い間は外へはみ出すため描かない。
+        let available = (rect.width() - BAR_SIDE_PAD * 2.0 * scale).max(1.0);
+        let target_gap = BAR_GAP * scale;
+        let bar_width = ((available - target_gap * (BAR_COUNT as f32 - 1.0)) / BAR_COUNT as f32)
+            .clamp(2.0 * scale, 3.0 * scale);
+        let gap = (available - bar_width * BAR_COUNT as f32) / (BAR_COUNT as f32 - 1.0);
+        if gap < 2.0 * scale {
+            return;
+        }
         let group_width = BAR_COUNT as f32 * bar_width + (BAR_COUNT as f32 - 1.0) * gap;
         let start_x = rect.left() + (rect.width() - group_width) * 0.5;
-        let weights = [0.58, 0.84, 1.0, 0.78, 0.62];
 
+        let elapsed = state_since.elapsed().as_secs_f32();
         match state {
             VisualState::Recording => {
                 // RMS を強めに持ち上げ、声の立ち上がりへ俊敏に追従させる。
                 let rms = f32::from_bits(level.load(Ordering::Relaxed));
-                let normalized = (rms.max(0.0) * 12.0).sqrt().clamp(0.0, 1.0);
-                let elapsed = state_since.elapsed().as_secs_f32();
-                for (index, weight) in weights.iter().enumerate() {
-                    let wobble = ((elapsed * 6.0 + index as f32 * 0.9).sin() * 0.5 + 0.5) * 1.4;
-                    let target = (1.5 + normalized * 13.0 + wobble) * weight;
-                    let current = &mut heights[index];
-                    let coefficient = if target > *current { 0.75 } else { 0.35 };
+                let normalized = (rms.max(0.0) * 14.0).sqrt().clamp(0.0, 1.0);
+                let phase = elapsed * 7.4;
+                for (index, current) in heights.iter_mut().enumerate() {
+                    let x = index as f32 / (BAR_COUNT as f32 - 1.0) * 2.0 - 1.0;
+                    let bell = (-2.8 * x * x).exp();
+                    // 中央から左右へ流れる成分と、微小な揺らぎを重ねる。
+                    let ripple = (phase - index as f32 * 0.42).sin();
+                    let shimmer = noise(elapsed * 9.0 + index as f32 * 2.17);
+                    let target = (2.4
+                        + normalized * (4.5 + 13.5 * bell)
+                        + ripple * 0.35 * (0.35 + 0.65 * bell)
+                        + shimmer * 0.30 * (0.25 + 0.75 * bell))
+                        .clamp(2.0, BAR_MAX_HEIGHT);
+                    let coefficient = if target > *current { 0.82 } else { 0.42 };
                     *current += (target - *current) * coefficient;
                 }
             }
             VisualState::Processing | VisualState::Pasting => {
-                let elapsed = state_since.elapsed().as_secs_f32();
                 let pulse = (elapsed * 9.0).sin() * 0.5 + 0.5;
                 for height in heights.iter_mut() {
-                    let target = 1.5 + pulse * 3.0;
-                    *height += (target - *height) * 0.28;
+                    let target = 2.0 + pulse * 2.5;
+                    *height += (target - *height) * 0.32;
                 }
             }
             VisualState::Idle => {
@@ -641,9 +657,7 @@ impl Ctx {
         }
 
         let converge = match state {
-            VisualState::Processing | VisualState::Pasting => {
-                (state_since.elapsed().as_secs_f32() * 5.5).clamp(0.0, 1.0)
-            }
+            VisualState::Processing | VisualState::Pasting => (elapsed * 5.5).clamp(0.0, 1.0),
             _ => 0.0,
         };
 
@@ -651,7 +665,6 @@ impl Ctx {
             && gate > 0.1
             && let Some(circle) = unit_circle
         {
-            let elapsed = state_since.elapsed().as_secs_f32();
             let pulse = (elapsed * 9.0).sin() * 0.5 + 0.5;
             let mut glow = Paint::default();
             glow.set_color(Color::from_rgba8(99, 102, 241, (22.0 * gate) as u8));
@@ -684,11 +697,11 @@ impl Ctx {
             ..Paint::default()
         };
 
-        for (index, height) in heights.iter().enumerate().take(BAR_COUNT) {
+        for (index, height) in heights.iter().enumerate() {
             let original_x = start_x + index as f32 * (bar_width + gap);
             let x = original_x + (center_x - original_x) * converge;
-            let height = (*height * gate).clamp(0.0, 19.0) * scale;
-            if height < 0.7 * scale {
+            let height = (*height * gate).clamp(0.0, BAR_MAX_HEIGHT * scale);
+            if height < 1.0 * scale {
                 continue;
             }
             let top = center_y - height * 0.5;
@@ -706,13 +719,13 @@ impl Ctx {
             }
             if converge < 0.9 && gate > 0.2 {
                 let glow_rect = Rect::from_xywh(
-                    x - 1.4 * scale,
-                    top - 1.1 * scale,
-                    bar_width + 2.8 * scale,
-                    height + 2.2 * scale,
+                    x - 0.9 * scale,
+                    top - 0.7 * scale,
+                    bar_width + 1.8 * scale,
+                    height + 1.4 * scale,
                 );
                 if let Some(glow_rect) = glow_rect
-                    && let Some(path) = rounded_rect(glow_rect, (bar_width + 2.8 * scale) * 0.5)
+                    && let Some(path) = rounded_rect(glow_rect, (bar_width + 1.8 * scale) * 0.5)
                 {
                     pixmap.fill_path(&path, &glow, FillRule::Winding, Transform::identity(), None);
                 }
@@ -852,6 +865,12 @@ impl Drop for Surface {
     }
 }
 
+/// 決定的な疑似ノイズ (-1.0..=1.0)。乱数クレートを増やさず微小な揺らぎを作る。
+fn noise(seed: f32) -> f32 {
+    let value = (seed * 12.9898).sin() * 43_758.547;
+    (value - value.floor()) * 2.0 - 1.0
+}
+
 fn close_center(rect: Rect, scale: f32) -> (f32, f32) {
     (rect.right() + 9.0 * scale, rect.top() + rect.height() * 0.5)
 }
@@ -974,8 +993,8 @@ fn bar_shader(start: f32, end: f32) -> Shader<'static> {
 
 fn glow_shader(start: f32, end: f32) -> Shader<'static> {
     let stops = vec![
-        GradientStop::new(0.0, Color::from_rgba8(56, 189, 248, 32)),
-        GradientStop::new(1.0, Color::from_rgba8(99, 102, 241, 20)),
+        GradientStop::new(0.0, Color::from_rgba8(56, 189, 248, 10)),
+        GradientStop::new(1.0, Color::from_rgba8(99, 102, 241, 7)),
     ];
     LinearGradient::new(
         tiny_skia::Point::from_xy(start, 0.0),
