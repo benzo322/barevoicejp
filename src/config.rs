@@ -340,6 +340,8 @@ impl Config {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Settings {
+    /// 初回起動のオンボーディングを表示するか。未設定の既存ファイルでも true。
+    pub(crate) first_run: bool,
     pub(crate) model: String,
     pub(crate) hotkey: String,
     pub(crate) autostart: bool,
@@ -417,8 +419,18 @@ impl Settings {
     }
 
     /// 実行時 [`Config`] から保存用の設定を作る。
+    ///
+    /// `first_run` は実行時 [`Config`] に存在しないため、既定では true とする。
+    /// 保存済みの値を維持したい呼び出し元は
+    /// [`Settings::from_config_with_first_run`] を使う。
     pub(crate) fn from_config(config: &Config) -> Self {
+        Self::from_config_with_first_run(config, true)
+    }
+
+    /// 実行時 [`Config`] と既存の `first_run` から保存用の設定を作る。
+    pub(crate) fn from_config_with_first_run(config: &Config, first_run: bool) -> Self {
         Self {
+            first_run,
             model: config.model.clone(),
             hotkey: config.hotkey.clone(),
             autostart: config.autostart,
@@ -721,6 +733,7 @@ mod tests {
     fn settings_roundtrip_and_clamp() {
         let mut config = Config::default();
         let mut settings = Settings::from_config(&config);
+        settings.first_run = false;
         settings.model = "whisper-small".to_string();
         settings.sound_theme = "chime".to_string();
         settings.sound_volume = 2.0;
@@ -758,5 +771,6 @@ mod tests {
         assert_eq!(settings.hotkey, "f9");
         assert_eq!(settings.model, "sensevoice");
         assert!(settings.floating_bar);
+        assert!(settings.first_run);
     }
 }

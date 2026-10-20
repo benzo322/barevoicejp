@@ -345,16 +345,23 @@ window.__barevoice = {
   },
   level(value) {
     applyLevel(value);
+  },
+  openTab(name) {
+    activateTab(name);
   }
 };
 
+function activateTab(name) {
+  const button = $$(".tab").find(item => item.dataset.tab === name);
+  if (!button) return;
+  tab = name;
+  $$(".tab").forEach(item => item.classList.toggle("active", item === button));
+  $$(".panel").forEach(panel => panel.classList.toggle("active", panel.dataset.panel === tab));
+  $("#app").scrollTo({ top: 0, behavior: "smooth" });
+}
+
 $$(".tab").forEach(button => {
-  button.addEventListener("click", () => {
-    tab = button.dataset.tab;
-    $$(".tab").forEach(item => item.classList.toggle("active", item === button));
-    $$(".panel").forEach(panel => panel.classList.toggle("active", panel.dataset.panel === tab));
-    $("#app").scrollTo({ top: 0, behavior: "smooth" });
-  });
+  button.addEventListener("click", () => activateTab(button.dataset.tab));
 });
 
 $("#hotkeyBox").addEventListener("click", () => {

@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use tao::dpi::{LogicalSize, PhysicalPosition};
+use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use tao::event::{Event, WindowEvent};
-use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
+use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
 use tao::platform::windows::WindowExtWindows;
 use tao::window::{Window, WindowBuilder};
 use windows_sys::Win32::Foundation::RECT;
@@ -30,6 +30,8 @@ use crate::win;
 /// トレイ・ワーカー・IPC からメインスレッドへ送るイベント。
 pub(crate) enum UiEvent {
     ShowSettings,
+    /// 初回起動のオンボーディングで「はじめる」が押された。
+    OnboardingDone,
     ReloadDictionaries,
     Ipc(String),
     Tick,
@@ -46,8 +48,11 @@ struct Notice {
 
 /// 設定画面とトレイを起動し、終了までイベントループを回す。
 pub(crate) fn run(mut app: App) -> ! {
-    let mut settings = Settings::from_config(&app.shared().snapshot());
-    let first_run = !Path::new(config::CONFIG_PATH).exists();
+    // `first_run` は保存済みの値を維持し、CLI で上書きされた実行時設定だけを取り込む。
+    let (stored, _) = Settings::load(Path::new(config::CONFIG_PATH));
+    let mut settings =
+        Settings::from_config_with_first_run(&app.shared().snapshot(), stored.first_run);
+    let first_run = settings.first_run;
 
     // 起動時にレジストリと設定を一致させる。
     if win::autostart_enabled() != settings.autostart
@@ -118,6 +123,20 @@ pub(crate) fn run(mut app: App) -> ! {
         crate::warn!("トレイアイコンを初期化できません: {exc}");
     }
 
+    // 初回起動時だけ、設定画面とは別の全画面オンボーディングを開く。
+    // 「はじめる」までは設定画面を表示しない。
+    let onboarding = if first_run {
+        match build_onboarding(&event_loop, proxy.clone()) {
+            Ok(pair) => Some(pair),
+            Err(exc) => {
+                crate::warn!("{exc}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let tick_proxy = proxy.clone();
     std::thread::Builder::new()
         .name("BAREVoiceJP-ui-tick".to_string())
@@ -134,21 +153,25 @@ pub(crate) fn run(mut app: App) -> ! {
     let mut notice: Option<Notice> = None;
     let mut notice_id = 0u64;
     let mut last_state = Instant::now() - Duration::from_secs(1);
-    let mut first_shown = false;
 
     event_loop.run(move |event, _target, control_flow| {
         *control_flow = ControlFlow::Wait;
-        if first_run && !first_shown && matches!(event, Event::NewEvents(_)) {
-            first_shown = true;
-            show_window(&window);
-            push_state(&webview, &app, &settings, &notice);
-            push_level(&webview, &app);
-        }
         match event {
             Event::UserEvent(UiEvent::ShowSettings) => {
-                show_window(&window);
+                show_window(&window, &webview);
                 push_state(&webview, &app, &settings, &notice);
                 push_level(&webview, &app);
+            }
+            Event::UserEvent(UiEvent::OnboardingDone) => {
+                if settings.first_run {
+                    settings.first_run = false;
+                    if let Err(exc) = settings.save(Path::new(config::CONFIG_PATH)) {
+                        crate::warn!("初回起動の完了状態を保存できません: {exc}");
+                    }
+                }
+                if let Some((onboarding_window, _)) = &onboarding {
+                    onboarding_window.set_visible(false);
+                }
             }
             Event::UserEvent(UiEvent::Quit) => {
                 tray::shutdown();
@@ -198,10 +221,20 @@ pub(crate) fn run(mut app: App) -> ! {
                 }
             }
             Event::WindowEvent {
+                window_id,
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                window.set_visible(false);
+                if onboarding
+                    .as_ref()
+                    .is_some_and(|(onboarding_window, _)| onboarding_window.id() == window_id)
+                {
+                    if let Some((onboarding_window, _)) = &onboarding {
+                        onboarding_window.set_visible(false);
+                    }
+                } else {
+                    window.set_visible(false);
+                }
             }
             Event::LoopDestroyed => {
                 app.shutdown();
@@ -213,22 +246,34 @@ pub(crate) fn run(mut app: App) -> ! {
 }
 
 /// 設定画面をフローティングバーの直上へ出し、最前面へ持ってくる。
-fn show_window(window: &Window) {
+///
+/// 手動で開いたときは常に「操作」タブから始める。
+fn show_window(window: &Window, webview: &WebView) {
     window.set_minimized(false);
     place_window(window);
     window.set_visible(true);
     window.set_focus();
     win::force_foreground(window.hwnd() as *mut core::ffi::c_void);
+    if let Err(exc) = webview.evaluate_script(
+        "window.__barevoice && window.__barevoice.openTab && window.__barevoice.openTab('control');",
+    ) {
+        crate::debug!("操作タブへ切り替えられません: {exc}");
+    }
+}
+
+/// プライマリディスプレイのワークエリアを返す。
+fn work_area() -> Option<RECT> {
+    let mut work: RECT = unsafe { std::mem::zeroed() };
+    // SAFETY: work は有効な出力先。SPI_GETWORKAREA はプライマリのワークエリアを返す。
+    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, (&raw mut work).cast(), 0) };
+    (ok != 0).then_some(work)
 }
 
 /// プライマリディスプレイの下端寄り (フローティングバーの直上) へ設定画面を移動する。
 fn place_window(window: &Window) {
-    let mut work: RECT = unsafe { std::mem::zeroed() };
-    // SAFETY: work は有効な出力先。SPI_GETWORKAREA はプライマリのワークエリアを返す。
-    let ok = unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, (&raw mut work).cast(), 0) };
-    if ok == 0 {
+    let Some(work) = work_area() else {
         return;
-    }
+    };
     let size = window.outer_size();
     let width = work.right - work.left;
     let x = work.left + (width - size.width as i32) / 2;
@@ -236,6 +281,47 @@ fn place_window(window: &Window) {
     let gap = (38.0 * window.scale_factor()).round() as i32;
     let y = (work.bottom - size.height as i32 - gap).max(work.top);
     window.set_outer_position(PhysicalPosition::new(x, y));
+}
+
+/// 初回起動用の全画面オンボーディングを作成して表示する。
+fn build_onboarding(
+    event_loop: &EventLoop<UiEvent>,
+    proxy: EventLoopProxy<UiEvent>,
+) -> Result<(Window, WebView), String> {
+    let work = work_area().ok_or_else(|| "ワークエリアを取得できません".to_string())?;
+    let width = (work.right - work.left).max(640) as u32;
+    let height = (work.bottom - work.top).max(480) as u32;
+
+    let window = WindowBuilder::new()
+        .with_title("BAREVoiceJP — ようこそ")
+        .with_inner_size(PhysicalSize::new(width, height))
+        .with_position(PhysicalPosition::new(work.left, work.top))
+        .with_decorations(false)
+        .with_resizable(false)
+        .with_visible(false)
+        .with_background_color((247, 250, 255, 255))
+        .build(event_loop)
+        .map_err(|exc| format!("オンボーディングウィンドウを作成できません: {exc}"))?;
+
+    let webview = WebViewBuilder::new()
+        .with_html(include_str!("web/onboarding.html"))
+        .with_background_color((247, 250, 255, 255))
+        .with_devtools(cfg!(debug_assertions))
+        .with_ipc_handler(move |request| {
+            let Ok(value) = serde_json::from_str::<Value>(request.body()) else {
+                return;
+            };
+            if value.get("cmd").and_then(Value::as_str) == Some("get_started") {
+                let _ = proxy.send_event(UiEvent::OnboardingDone);
+            }
+        })
+        .build(&window)
+        .map_err(|exc| format!("オンボーディング画面を初期化できません: {exc}"))?;
+
+    window.set_visible(true);
+    window.set_focus();
+    win::force_foreground(window.hwnd() as *mut core::ffi::c_void);
+    Ok((window, webview))
 }
 
 /// 連番付きの通知をセットする (同じ文面でも再表示できる)。
@@ -390,7 +476,7 @@ fn save_settings(
     let previous = settings.clone();
     let mut config = app.shared().snapshot();
     next.apply_to(&mut config);
-    let mut applied = Settings::from_config(&config);
+    let mut applied = Settings::from_config_with_first_run(&config, next.first_run);
 
     if applied.hotkey != previous.hotkey {
         win::set_hotkey(hotkey);
@@ -411,7 +497,7 @@ fn save_settings(
         config.device = previous.device.clone();
         app.apply_config(config.clone());
         let _ = app.restart_capture(&config);
-        applied = Settings::from_config(&config);
+        applied = Settings::from_config_with_first_run(&config, previous.first_run);
         let _ = applied.save(Path::new(config::CONFIG_PATH));
         *settings = applied;
         set_notice(

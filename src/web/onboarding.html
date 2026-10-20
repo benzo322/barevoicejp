@@ -1,0 +1,330 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BAREVoiceJP — ようこそ</title>
+<style>
+  :root{
+    color-scheme: light;
+    --ink:#0b1220;
+    --text:#334155;
+    --muted:#64748b;
+    --soft:#94a3b8;
+    --sky:#38bdf8;
+    --blue:#60a5fa;
+    --indigo:#6366f1;
+    --line:rgba(148,163,184,.18);
+    --glass:rgba(255,255,255,.7);
+    --glass-strong:rgba(255,255,255,.9);
+    --shadow:0 30px 80px -48px rgba(30,64,175,.42);
+    --shadow-soft:0 16px 44px -30px rgba(30,64,175,.42);
+  }
+  *{box-sizing:border-box}
+  html,body{min-height:100%;margin:0}
+  html{scrollbar-color:rgba(148,163,184,.5) transparent}
+  body{
+    font-family:"Segoe UI Variable Display","Segoe UI","Yu Gothic UI","Hiragino Sans",system-ui,-apple-system,sans-serif;
+    color:var(--ink);
+    -webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
+    background:
+      radial-gradient(1100px 680px at 4% -14%, rgba(186,230,253,.9) 0%, rgba(186,230,253,0) 62%),
+      radial-gradient(1000px 620px at 98% -6%, rgba(221,214,254,.86) 0%, rgba(221,214,254,0) 58%),
+      radial-gradient(900px 640px at 52% 114%, rgba(191,219,254,.7) 0%, rgba(191,219,254,0) 66%),
+      linear-gradient(180deg,#f8fbff 0%,#eef4fc 100%);
+  }
+  body::before{
+    content:"";position:fixed;inset:0;pointer-events:none;opacity:.3;z-index:0;
+    background-image:radial-gradient(rgba(148,163,184,.18) .6px, transparent .6px);
+    background-size:4px 4px;
+    mask-image:linear-gradient(180deg,rgba(0,0,0,.6),transparent 72%);
+  }
+  button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+  ::selection{background:rgba(99,102,241,.18)}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:rgba(148,163,184,.36);border-radius:99px;border:3px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-track{background:transparent}
+  .page{
+    position:relative;z-index:1;
+    width:min(1380px,100%);
+    min-height:100vh;
+    margin:0 auto;
+    padding:clamp(20px,2.6vw,40px) clamp(24px,4.6vw,72px) 0;
+    display:flex;flex-direction:column;
+    animation:pageIn .55s cubic-bezier(.2,.8,.2,1) both;
+  }
+  .topbar{display:flex;align-items:center;justify-content:space-between;gap:24px;flex:none}
+  .brand{display:flex;align-items:center;gap:13px}
+  .logo{
+    width:42px;height:42px;border-radius:14px;display:grid;place-items:center;color:#fff;flex:none;
+    background:linear-gradient(135deg,#38bdf8,#6366f1);
+    box-shadow:0 12px 26px -12px rgba(79,70,229,.7), inset 0 1px 0 rgba(255,255,255,.62);
+  }
+  .logo svg{width:21px;height:21px}
+  .brand-name{font-size:15px;font-weight:700;letter-spacing:.16em;color:#1e293b}
+  .brand-sub{display:block;margin-top:3px;font-size:9.5px;letter-spacing:.26em;font-weight:650;color:#94a3b8}
+  .local-pill{
+    display:inline-flex;align-items:center;gap:8px;padding:9px 14px;border-radius:99px;
+    font-size:11px;font-weight:650;letter-spacing:.02em;color:#475569;
+    background:rgba(255,255,255,.72);border:1px solid rgba(255,255,255,.98);
+    box-shadow:var(--shadow-soft);backdrop-filter:blur(20px)
+  }
+  .local-pill svg{width:14px;height:14px;color:#10b981}
+  .local-pill i{width:6px;height:6px;border-radius:50%;background:#10b981;box-shadow:0 0 0 4px rgba(16,185,129,.12)}
+  .stage{flex:1;display:flex;flex-direction:column;justify-content:center;padding:clamp(28px,4.6vh,56px) 0 clamp(22px,3vh,36px)}
+  .hero{margin-bottom:clamp(24px,3.4vh,40px)}
+  .eyebrow{display:flex;align-items:center;gap:10px;font-size:10.5px;letter-spacing:.24em;font-weight:700;color:#7c8ba1;text-transform:uppercase;margin-bottom:15px}
+  .eyebrow::before{content:"";width:28px;height:1px;background:linear-gradient(90deg,var(--sky),var(--indigo));border-radius:2px}
+  .hero h1{
+    margin:0;font-size:clamp(40px,5vw,72px);line-height:1.04;letter-spacing:-.055em;font-weight:650;
+    background:linear-gradient(112deg,#09111f 8%,#1e293b 54%,#475569 100%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .hero h1 span{
+    background:linear-gradient(112deg,#0ea5e9 0%,#6366f1 70%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .lede{margin:16px 0 0;max-width:720px;font-size:14px;line-height:1.85;color:#64748b}
+  .layout{display:grid;grid-template-columns:minmax(0,1.06fr) minmax(380px,.94fr);gap:18px;align-items:stretch}
+  .card{
+    border-radius:26px;padding:clamp(20px,2vw,28px);
+    background:var(--glass);border:1px solid rgba(255,255,255,.98);
+    box-shadow:var(--shadow), inset 0 1px 0 rgba(255,255,255,.9);
+    backdrop-filter:blur(26px) saturate(1.12);
+    position:relative;overflow:hidden;
+  }
+  .card::after{
+    content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    background:linear-gradient(140deg,rgba(255,255,255,.5),transparent 44%);
+  }
+  .memo-card{display:flex;flex-direction:column;background:linear-gradient(155deg,rgba(255,255,255,.94),rgba(248,251,255,.72))}
+  .card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin-bottom:18px;position:relative;z-index:1}
+  .kicker{font-size:9.5px;letter-spacing:.22em;font-weight:700;color:#94a3b8;text-transform:uppercase;margin-bottom:8px}
+  .card h2{margin:0;font-size:18px;line-height:1.25;letter-spacing:-.025em;font-weight:650}
+  .card .sub{margin:6px 0 0;font-size:11.5px;line-height:1.6;color:#7c8ba1}
+  .badge{
+    display:inline-flex;align-items:center;gap:6px;flex:none;padding:5px 10px;border-radius:99px;
+    font-size:9px;font-weight:700;letter-spacing:.08em;color:#0369a1;
+    background:rgba(224,242,254,.9);border:1px solid rgba(14,165,233,.15);white-space:nowrap
+  }
+  .memo{
+    position:relative;z-index:1;padding:18px 20px 20px 30px;border-radius:18px;
+    background:rgba(255,255,255,.62);border:1px solid rgba(148,163,184,.14);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.8);
+  }
+  .memo::before{
+    content:"“";position:absolute;left:10px;top:2px;font-family:Georgia,"Times New Roman",serif;
+    font-size:46px;line-height:1;color:rgba(99,102,241,.2)
+  }
+  .memo p{margin:0 0 13px;font-size:13px;line-height:1.95;color:#334155;letter-spacing:.005em}
+  .memo p:last-child{margin-bottom:0}
+  .memo .sign{margin-top:18px;padding-top:14px;border-top:1px solid rgba(148,163,184,.15);
+    display:flex;align-items:center;gap:10px;font-size:10.5px;color:#94a3b8}
+  .sign-mark{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;flex:none;
+    color:#fff;font-size:10px;font-weight:700;letter-spacing:.04em;
+    background:linear-gradient(135deg,#7dd3fc,#818cf8);box-shadow:0 6px 14px -8px rgba(79,70,229,.6)}
+  .tutorial{display:flex;flex-direction:column;gap:14px}
+  .lesson{
+    position:relative;z-index:1;flex:1;border-radius:20px;padding:18px 18px 16px;
+    background:rgba(255,255,255,.6);border:1px solid rgba(148,163,184,.15);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.88);
+    display:flex;flex-direction:column;gap:14px;transition:.24s ease;
+  }
+  .lesson:hover{transform:translateY(-2px);border-color:rgba(99,102,241,.24);background:rgba(255,255,255,.78);
+    box-shadow:var(--shadow-soft), inset 0 1px 0 rgba(255,255,255,.95)}
+  .lesson-top{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .lesson-title{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:650;color:#1e293b}
+  .lesson-title .num{width:22px;height:22px;border-radius:8px;display:grid;place-items:center;flex:none;
+    font-size:10px;font-weight:700;color:#4338ca;background:rgba(238,242,255,.95);border:1px solid rgba(99,102,241,.15)}
+  .lesson-tag{font-size:9px;font-weight:700;letter-spacing:.12em;color:#94a3b8;text-transform:uppercase;white-space:nowrap}
+  .diagram{
+    display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:15px 16px;border-radius:15px;
+    background:linear-gradient(160deg,rgba(255,255,255,.94),rgba(241,247,255,.74));
+    border:1px solid rgba(255,255,255,.98);
+    box-shadow:0 14px 28px -24px rgba(30,64,175,.4), inset 0 1px 0 #fff;
+  }
+  .keycap-visual{
+    display:inline-flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;
+    min-width:112px;padding:11px 16px 9px;border-radius:12px;
+    background:linear-gradient(180deg,#ffffff 0%,#edf4ff 100%);
+    border:1px solid rgba(148,163,184,.32);border-bottom-width:3px;
+    box-shadow:0 6px 0 -1px rgba(148,163,184,.22), inset 0 1px 0 #fff;
+    color:#312e81;font-family:"Cascadia Code","Consolas",monospace;font-size:13px;font-weight:650;letter-spacing:-.01em
+  }
+  .keycap-visual small{font-family:"Segoe UI",system-ui,sans-serif;font-size:8px;font-weight:700;letter-spacing:.17em;color:#94a3b8}
+  .gesture{display:flex;align-items:center;gap:7px;flex-wrap:wrap;flex:1;min-width:150px}
+  .gesture-step{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:650;color:#64748b}
+  .gesture-step i{width:5px;height:5px;border-radius:50%;background:#cbd5e1}
+  .gesture-step.live i{background:#38bdf8;box-shadow:0 0 0 4px rgba(56,189,248,.14);animation:pulse 1.8s ease-out infinite}
+  .gesture-arrow{width:14px;height:1px;background:rgba(148,163,184,.45);position:relative;flex:none}
+  .gesture-arrow::after{content:"";position:absolute;right:0;top:-2px;width:5px;height:5px;border-top:1px solid rgba(148,163,184,.65);
+    border-right:1px solid rgba(148,163,184,.65);transform:rotate(45deg)}
+  .tap-pair{display:flex;align-items:center;gap:8px}
+  .tap-count{font-size:15px;font-weight:700;letter-spacing:-.02em;
+    background:linear-gradient(120deg,#38bdf8,#6366f1);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .toggle-state{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:10px;font-weight:650;color:#475569}
+  .lock{display:inline-flex;align-items:center;gap:5px;padding:5px 9px;border-radius:99px;
+    color:#047857;background:rgba(209,250,229,.8);border:1px solid rgba(16,185,129,.18);font-size:9.5px;font-weight:700}
+  .lock svg{width:11px;height:11px}
+  .lesson-note{margin:0;font-size:11.5px;line-height:1.7;color:#7c8ba1}
+  .cta{
+    flex:none;display:flex;align-items:center;justify-content:space-between;gap:24px;
+    padding:18px 0 22px;border-top:1px solid rgba(148,163,184,.15);
+  }
+  .cta-hint{display:flex;align-items:center;gap:9px;font-size:11px;line-height:1.6;color:#94a3b8}
+  .cta-hint svg{width:15px;height:15px;flex:none;color:#818cf8}
+  .start{
+    display:inline-flex;align-items:center;justify-content:center;gap:12px;flex:none;
+    padding:15px 26px;border-radius:15px;font-size:14px;font-weight:650;color:#fff;
+    background:linear-gradient(120deg,#38bdf8 0%,#6366f1 100%);
+    box-shadow:0 18px 34px -18px rgba(79,70,229,.7), inset 0 1px 0 rgba(255,255,255,.4);
+    transition:.2s cubic-bezier(.2,.8,.2,1);outline:none;
+  }
+  .start small{font-size:10px;font-weight:600;letter-spacing:.02em;opacity:.78}
+  .start svg{width:15px;height:15px;transition:transform .2s ease}
+  .start:hover{filter:brightness(1.045);transform:translateY(-1px);box-shadow:0 22px 40px -18px rgba(79,70,229,.78), inset 0 1px 0 rgba(255,255,255,.4)}
+  .start:hover svg{transform:translateX(3px)}
+  .start:focus-visible{box-shadow:0 0 0 4px rgba(99,102,241,.2),0 18px 34px -18px rgba(79,70,229,.7)}
+  .start:disabled{cursor:default;filter:saturate(.7);opacity:.72;transform:none}
+  @keyframes pageIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(56,189,248,.3)}80%,100%{box-shadow:0 0 0 7px rgba(56,189,248,0)}}
+  @media (max-width:1040px){
+    .layout{grid-template-columns:1fr}
+    .tutorial{display:grid;grid-template-columns:1fr 1fr}
+  }
+  @media (max-width:760px){
+    .page{padding:20px 18px 0}
+    .local-pill span{display:none}
+    .stage{padding:30px 0 20px}
+    .tutorial{grid-template-columns:1fr}
+    .cta{flex-direction:column;align-items:stretch;gap:14px}
+    .start{width:100%}
+    .cta-hint{justify-content:center;text-align:center}
+  }
+  @media (prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;transition-duration:.01ms!important}}
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><path d="M12 19v3"/></svg>
+      </div>
+      <div>
+        <div class="brand-name">BAREVoiceJP</div>
+        <span class="brand-sub">LOCAL VOICE INPUT</span>
+      </div>
+    </div>
+    <div class="local-pill"><i></i><span>完全ローカル</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4.5 6v5.5c0 4.4 3 7.6 7.5 9.5 4.5-1.9 7.5-5.1 7.5-9.5V6L12 3Z"/><path d="m9 12 2 2 4-4"/></svg></div>
+  </header>
+
+  <main class="stage">
+    <section class="hero">
+      <div class="eyebrow">Welcome to BAREVoiceJP</div>
+      <h1>あえて、<span>清書しない。</span></h1>
+      <p class="lede">右Altを押して、頭の中をそのまま話す。音声はネットに一切出ず、ホットキーを離した瞬間に思考がそのまま貼り付きます。まずは、使い方を2つだけ覚えてください。</p>
+    </section>
+
+    <section class="layout">
+      <article class="card memo-card">
+        <div class="card-head">
+          <div>
+            <div class="kicker">From the developer</div>
+            <h2>開発者メモ</h2>
+            <p class="sub">なぜ、清書しないのか。</p>
+          </div>
+          <span class="badge">LOCAL ONLY</span>
+        </div>
+        <div class="memo">
+          <p>Copilotと壁打ちするとき、キーボードで打つのが普通にめんどくさくなったのが始まり。</p>
+          <p>世の中の音声入力アプリって、月額サブスク取られるし音声データは勝手にネットに飛んでいくしで社内の仕事じゃ使いづらい。かといって無料のローカルツールは推論が重くて、キー離してから文字が出るまで数秒待たされて思考が止まる。</p>
+          <p>そもそも相手はCopilotなんだから、手元のツールで綺麗に清書する必要なんてない。文脈はあっちが勝手に忖度して読んでくれるしね。</p>
+          <p>だから「ネットに一切出ない完全ローカル」で「ホットキー離したら0.2秒で思考がそのまま貼り付く」やつを作りました。</p>
+          <p>綺麗に喋ろうとせず、頭の中のモヤモヤをそのまましゃべってください。copilotとの距離が近くなるはず。</p>
+          <div class="sign"><span class="sign-mark">B</span>BAREVoiceJP 開発者</div>
+        </div>
+      </article>
+
+      <aside class="tutorial">
+        <div class="lesson">
+          <div class="lesson-top">
+            <div class="lesson-title"><span class="num">1</span>長押しして話す</div>
+            <span class="lesson-tag">Push-to-Talk</span>
+          </div>
+          <div class="diagram">
+            <div class="keycap-visual">Right Alt<small>HOLD</small></div>
+            <div class="gesture">
+              <span class="gesture-step live"><i></i>押す</span>
+              <span class="gesture-arrow"></span>
+              <span class="gesture-step live"><i></i>話す</span>
+              <span class="gesture-arrow"></span>
+              <span class="gesture-step"><i></i>離す</span>
+              <span class="gesture-arrow"></span>
+              <span class="gesture-step">貼付</span>
+            </div>
+          </div>
+          <p class="lesson-note">右Altを押している間だけ録音。離すとその場で認識し、カーソル位置へ貼り付けます。</p>
+        </div>
+
+        <div class="lesson">
+          <div class="lesson-top">
+            <div class="lesson-title"><span class="num">2</span>2回押しで固定</div>
+            <span class="lesson-tag">Toggle</span>
+          </div>
+          <div class="diagram">
+            <div class="tap-pair">
+              <div class="keycap-visual">Right Alt<small>TAP ×2</small></div>
+              <span class="tap-count">×2</span>
+            </div>
+            <div class="toggle-state">
+              <span class="lock"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>録音固定</span>
+              <span class="gesture-arrow"></span>
+              <span>1回押して停止</span>
+            </div>
+          </div>
+          <p class="lesson-note">300ms以内に2回押すと録音が固定され、手を離しても続きます。止めるときは右Altを1回押します。</p>
+        </div>
+      </aside>
+    </section>
+  </main>
+
+  <footer class="cta">
+    <div class="cta-hint">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+      設定はあとからタスクトレイの BAREVoiceJP アイコンから開けます。長押し中に Esc で破棄できます。
+    </div>
+    <button class="start" id="startButton" type="button">
+      はじめる <small>(Get Started)</small>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>
+    </button>
+  </footer>
+</div>
+
+<script>
+(function () {
+  var button = document.getElementById("startButton");
+  var sent = false;
+
+  function finish() {
+    if (sent) return;
+    sent = true;
+    button.disabled = true;
+    if (!window.ipc) {
+      sent = false;
+      button.disabled = false;
+      return;
+    }
+    window.ipc.postMessage(JSON.stringify({ cmd: "get_started" }));
+  }
+
+  button.addEventListener("click", finish);
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" && !event.repeat) finish();
+  });
+  button.focus();
+})();
+</script>
+</body>
+</html>
