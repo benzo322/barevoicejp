@@ -57,18 +57,18 @@ unsafe extern "system" {
 /// `right_alt` が真のときだけ OS への伝播を抑制し、メニューバーへの
 /// フォーカス移動を防ぐ。
 #[derive(Clone, Copy, Debug)]
-pub struct Hotkey {
+pub(crate) struct Hotkey {
     vk: u16,
     right_alt: bool,
 }
 
 /// NUL 終端の UTF-16 へ変換する。
-pub fn wide(text: &str) -> Vec<u16> {
+pub(crate) fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 /// 設定ウィンドウを最前面へ出し、フォーカスを移す。
-pub fn force_foreground(hwnd: *mut core::ffi::c_void) {
+pub(crate) fn force_foreground(hwnd: *mut core::ffi::c_void) {
     // SAFETY: hwnd は呼び出し元の有効なトップレベルウィンドウ。
     unsafe {
         ShowWindow(hwnd, SW_SHOW);
@@ -96,7 +96,7 @@ pub fn force_foreground(hwnd: *mut core::ffi::c_void) {
 }
 
 /// 枠なし設定ウィンドウをドラッグ移動する。
-pub fn begin_drag(hwnd: *mut core::ffi::c_void) {
+pub(crate) fn begin_drag(hwnd: *mut core::ffi::c_void) {
     // SAFETY: hwnd は呼び出し元の有効なトップレベルウィンドウ。
     unsafe {
         ReleaseCapture();
@@ -105,7 +105,7 @@ pub fn begin_drag(hwnd: *mut core::ffi::c_void) {
 }
 
 /// コンソールウィンドウを隠す (`--console` 指定時は呼ばない)。
-pub fn hide_console() {
+pub(crate) fn hide_console() {
     // SAFETY: コンソールが無ければ NULL が返るだけ。
     unsafe {
         let console = GetConsoleWindow();
@@ -119,7 +119,7 @@ const AUTOSTART_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const AUTOSTART_VALUE: &str = "mkvoicejp";
 
 /// 自動起動がレジストリに登録されているか。
-pub fn autostart_enabled() -> bool {
+pub(crate) fn autostart_enabled() -> bool {
     let key = wide(AUTOSTART_KEY);
     let name = wide(AUTOSTART_VALUE);
     let mut hkey: HKEY = std::ptr::null_mut();
@@ -152,7 +152,7 @@ pub fn autostart_enabled() -> bool {
 }
 
 /// 自動起動を登録・解除する。
-pub fn set_autostart(enabled: bool) -> Result<(), String> {
+pub(crate) fn set_autostart(enabled: bool) -> Result<(), String> {
     let key = wide(AUTOSTART_KEY);
     let name = wide(AUTOSTART_VALUE);
     let mut hkey: HKEY = std::ptr::null_mut();
@@ -189,7 +189,7 @@ pub fn set_autostart(enabled: bool) -> Result<(), String> {
 /// `alt_r` / `f9` / `ctrl_r` などのキー名を仮想キーコードへ変換する。
 ///
 /// `Key.` 接頭辞、`option`/`command`/`control` の別名も受け付ける。
-pub fn parse_hotkey(spec: &str) -> Result<Hotkey, String> {
+pub(crate) fn parse_hotkey(spec: &str) -> Result<Hotkey, String> {
     let text = spec.trim();
     if text.is_empty() {
         return Err("ホットキーが空です。例: ctrl_r, alt_r, f9".to_string());
@@ -282,7 +282,7 @@ impl Drop for ClipboardGuard {
 }
 
 /// クリップボードのテキストを読み取る。テキストが無ければ空文字列。
-pub fn clipboard_get() -> Result<String, String> {
+pub(crate) fn clipboard_get() -> Result<String, String> {
     let _clipboard = ClipboardGuard::open()?;
     // SAFETY: ガードがクリップボードを開いたまま保持している。
     unsafe {
@@ -309,7 +309,7 @@ pub fn clipboard_get() -> Result<String, String> {
 }
 
 /// クリップボードを UTF-16 テキストで置き換える。
-pub fn clipboard_set(text: &str) -> Result<(), String> {
+pub(crate) fn clipboard_set(text: &str) -> Result<(), String> {
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let bytes = wide.len() * std::mem::size_of::<u16>();
 
@@ -369,7 +369,7 @@ fn key_event(vk: u16, up: bool) -> INPUT {
 }
 
 /// Ctrl down → V down → V up → Ctrl up を 1 回の SendInput で送る。
-pub fn send_ctrl_v() -> Result<(), String> {
+pub(crate) fn send_ctrl_v() -> Result<(), String> {
     let inputs = [
         key_event(VK_CONTROL, false),
         key_event(VK_V, false),
@@ -400,7 +400,7 @@ pub fn send_ctrl_v() -> Result<(), String> {
 /// フックが呼ぶコールバック一式。
 ///
 /// `cancel_vk` は常に Esc。ホットキー押下中でも Esc で発話を破棄できる。
-pub struct HookHandler {
+pub(crate) struct HookHandler {
     hotkey: Hotkey,
     cancel_vk: u16,
     on_press: Box<dyn Fn() + Send + Sync>,
@@ -410,7 +410,7 @@ pub struct HookHandler {
 
 impl HookHandler {
     /// 押下・離下・キャンセルのコールバックを登録する。
-    pub fn new(
+    pub(crate) fn new(
         hotkey: Hotkey,
         on_press: Box<dyn Fn() + Send + Sync>,
         on_release: Box<dyn Fn() + Send + Sync>,
@@ -433,13 +433,13 @@ static HOTKEY_VK: AtomicU32 = AtomicU32::new(0);
 static HOTKEY_RIGHT_ALT: AtomicBool = AtomicBool::new(false);
 
 /// 設定画面からホットキーを差し替える。フックの再設置は不要。
-pub fn set_hotkey(hotkey: Hotkey) {
+pub(crate) fn set_hotkey(hotkey: Hotkey) {
     HOTKEY_VK.store(u32::from(hotkey.vk), Ordering::SeqCst);
     HOTKEY_RIGHT_ALT.store(hotkey.right_alt, Ordering::SeqCst);
 }
 
 /// 設置したキーボードフック。ドロップ時に自動で解除する。
-pub struct HookGuard {
+pub(crate) struct HookGuard {
     hook: HHOOK,
 }
 
@@ -455,7 +455,7 @@ impl Drop for HookGuard {
 ///
 /// フックコールバックはこの関数を呼んだスレッドで実行されるため、
 /// 呼び出し後に [`run_message_loop`] を回す必要がある。
-pub fn install(handler: HookHandler) -> Result<HookGuard, String> {
+pub(crate) fn install(handler: HookHandler) -> Result<HookGuard, String> {
     set_hotkey(handler.hotkey);
     if HANDLER.set(handler).is_err() {
         return Err("キーボードフックは既に設定されています".to_string());
@@ -473,10 +473,12 @@ pub fn install(handler: HookHandler) -> Result<HookGuard, String> {
     }
 }
 
+/// 右 Alt かどうか。拡張キービットも見て左右を区別する。
 fn is_right_alt(vk: u16, flags: u32) -> bool {
     vk == VK_RMENU || (vk == VK_MENU && flags & LLKHF_EXTENDED != 0)
 }
 
+/// フック内のパニックで OS の入力処理を止めないよう包んで実行する。
 fn fire(callback: &(dyn Fn() + Send + Sync)) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
 }

@@ -16,7 +16,7 @@ const WHISPER_SMALL_DIR_NAME: &str = "sherpa-onnx-whisper-small";
 const WHISPER_TURBO_DIR_NAME: &str = "sherpa-onnx-whisper-large-v3-turbo";
 
 /// UI と CLI が受け付けるモデル ID。
-pub const MODEL_IDS: [&str; 5] = [
+pub(crate) const MODEL_IDS: [&str; 5] = [
     "sensevoice",
     "reazonspeech",
     "whisper-base",
@@ -25,7 +25,7 @@ pub const MODEL_IDS: [&str; 5] = [
 ];
 
 /// モデル ID に対応する展開先ディレクトリ名。
-pub fn model_dir_name(model: &str) -> &'static str {
+pub(crate) fn model_dir_name(model: &str) -> &'static str {
     match model {
         "reazonspeech" => REAZONSPEECH_DIR_NAME,
         "whisper-base" => WHISPER_BASE_DIR_NAME,
@@ -36,7 +36,7 @@ pub fn model_dir_name(model: &str) -> &'static str {
 }
 
 /// 設定ファイル名 (カレントディレクトリ基準)。
-pub const CONFIG_PATH: &str = "config.toml";
+pub(crate) const CONFIG_PATH: &str = "config.toml";
 
 // ---------------------------------------------------------------------------
 // 内部チューニング定数
@@ -45,39 +45,39 @@ pub const CONFIG_PATH: &str = "config.toml";
 // 実装上の固定値 (モデル仕様・無音判定・再試行回数など) を集約する。
 // ---------------------------------------------------------------------------
 /// 推論モデルが要求する特徴量次元。
-pub const FEATURE_DIM: i32 = 80;
+pub(crate) const FEATURE_DIM: i32 = 80;
 /// greedy/beam 探索で保持するパス数。
-pub const MAX_ACTIVE_PATHS: i32 = 4;
+pub(crate) const MAX_ACTIVE_PATHS: i32 = 4;
 /// これ未満のピーク振幅は無音とみなす。
-pub const SILENCE_PEAK_THRESHOLD: f32 = 1e-4;
+pub(crate) const SILENCE_PEAK_THRESHOLD: f32 = 1e-4;
 /// ハイパスフィルタのカットオフ周波数 (Hz)。
-pub const HIGHPASS_CUTOFF_HZ: f64 = 80.0;
+pub(crate) const HIGHPASS_CUTOFF_HZ: f64 = 80.0;
 /// tail サンプルの到着を待つ上限 (ms)。
-pub const WORKER_WAIT_TIMEOUT_MS: u64 = 2_000;
+pub(crate) const WORKER_WAIT_TIMEOUT_MS: u64 = 2_000;
 /// tail 待ちのポーリング間隔 (ms)。
-pub const WORKER_POLL_INTERVAL_MS: u64 = 5;
+pub(crate) const WORKER_POLL_INTERVAL_MS: u64 = 5;
 /// クリップボードを開く際の再試行回数。
-pub const CLIPBOARD_OPEN_ATTEMPTS: u32 = 10;
+pub(crate) const CLIPBOARD_OPEN_ATTEMPTS: u32 = 10;
 /// クリップボード再試行の間隔 (ms)。
-pub const CLIPBOARD_OPEN_RETRY_MS: u64 = 10;
+pub(crate) const CLIPBOARD_OPEN_RETRY_MS: u64 = 10;
 /// cpal のストリームエラーコールバック待ちタイムアウト (ms)。
-pub const AUDIO_STREAM_TIMEOUT_MS: u64 = 1_000;
+pub(crate) const AUDIO_STREAM_TIMEOUT_MS: u64 = 1_000;
 /// 音声コールバックの一時バッファ初期容量 (サンプル数)。
-pub const AUDIO_SCRATCH_SAMPLES: usize = 8_192;
+pub(crate) const AUDIO_SCRATCH_SAMPLES: usize = 8_192;
 /// ファジーマッチ対象にする読み・正式表記の最小文字数。
-pub const FUZZY_MIN_CHARS: usize = 4;
+pub(crate) const FUZZY_MIN_CHARS: usize = 4;
 /// 読みが長い単語でしきい値を緩和する文字数。
-pub const FUZZY_LENIENT_MIN_CHARS: usize = 6;
+pub(crate) const FUZZY_LENIENT_MIN_CHARS: usize = 6;
 /// 読みが長い単語の緩和しきい値 (%)。
-pub const FUZZY_LENIENT_THRESHOLD: f64 = 75.0;
+pub(crate) const FUZZY_LENIENT_THRESHOLD: f64 = 75.0;
 /// ファジー照合で許容する読みとの長さ差 (文字)。
-pub const FUZZY_LENGTH_SLACK: usize = 2;
+pub(crate) const FUZZY_LENGTH_SLACK: usize = 2;
 /// リングバッファ長の下限 (秒)。
-pub const MIN_RING_SECONDS: f32 = 1.0;
+pub(crate) const MIN_RING_SECONDS: f32 = 1.0;
 /// ミリ秒と秒の換算。
-pub const MS_PER_SECOND: u64 = 1_000;
+pub(crate) const MS_PER_SECOND: u64 = 1_000;
 /// 浮動小数で扱うミリ秒換算。
-pub const MS_PER_SECOND_F64: f64 = MS_PER_SECOND as f64;
+pub(crate) const MS_PER_SECOND_F64: f64 = MS_PER_SECOND as f64;
 
 /// `models/` のルートを探す。
 ///
@@ -85,7 +85,7 @@ pub const MS_PER_SECOND_F64: f64 = MS_PER_SECOND as f64;
 /// Rust 版はビルド時のマニフェスト位置 → exe の隣 → カレントディレクトリの順に
 /// 実在するものを採用する。どこにも無ければマニフェスト位置 (開発時) か
 /// カレントディレクトリを使う。
-pub fn models_root() -> PathBuf {
+pub(crate) fn models_root() -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::with_capacity(3);
     if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
         candidates.push(PathBuf::from(manifest).join("models"));
@@ -98,8 +98,8 @@ pub fn models_root() -> PathBuf {
     if let Ok(cwd) = std::env::current_dir() {
         candidates.push(cwd.join("models"));
     }
-    if let Some(found) = candidates.iter().find(|path| path.exists()) {
-        return found.clone();
+    if let Some(found) = candidates.into_iter().find(|path| path.exists()) {
+        return found;
     }
     // どこにも無ければ exe の隣に作る。自動起動時もカレントディレクトリに
     // 依存せず、モデル・辞書・設定を同じ場所へ置ける。
@@ -115,7 +115,7 @@ pub fn models_root() -> PathBuf {
 ///
 /// Windows の自動起動ではカレントディレクトリが System32 などになるため、
 /// `config.toml` / `words.txt` / `models/` を exe の隣で一貫して扱う。
-pub fn use_data_root() {
+pub(crate) fn use_data_root() {
     let Some(root) = models_root().parent().map(Path::to_path_buf) else {
         return;
     };
@@ -136,7 +136,7 @@ fn default_model_dir(name: &str) -> PathBuf {
 
 /// 通知音のテーマ。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SoundTheme {
+pub(crate) enum SoundTheme {
     /// アンビエントな「フワン…」と和音フェード。
     #[default]
     Soft,
@@ -149,7 +149,7 @@ pub enum SoundTheme {
 }
 
 impl SoundTheme {
-    pub fn as_str(self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             Self::Soft => "soft",
             Self::Pop => "pop",
@@ -158,7 +158,8 @@ impl SoundTheme {
         }
     }
 
-    pub fn parse(value: &str) -> Self {
+    /// 設定文字列をテーマへ変換する。不明な値は `Soft`。
+    pub(crate) fn parse(value: &str) -> Self {
         match value {
             "pop" => Self::Pop,
             "chime" => Self::Chime,
@@ -174,66 +175,66 @@ impl SoundTheme {
 /// [`Config::apply_cli`] が上書きする。キー割り当て・録音長・しきい値などを
 /// 変える場合はまずこの構造体を編集する。
 #[derive(Clone, Debug)]
-pub struct Config {
+pub(crate) struct Config {
     // --- モデル ---
-    pub model: String,
-    pub model_dir_override: Option<PathBuf>,
-    pub sensevoice_model_dir: PathBuf,
-    pub reazonspeech_model_dir: PathBuf,
-    pub whisper_base_model_dir: PathBuf,
-    pub whisper_small_model_dir: PathBuf,
-    pub whisper_turbo_model_dir: PathBuf,
-    pub num_threads: i32,
-    pub provider: String,
-    pub language: String,
-    pub use_itn: bool,
-    pub hotwords_score: f32,
+    pub(crate) model: String,
+    pub(crate) model_dir_override: Option<PathBuf>,
+    pub(crate) sensevoice_model_dir: PathBuf,
+    pub(crate) reazonspeech_model_dir: PathBuf,
+    pub(crate) whisper_base_model_dir: PathBuf,
+    pub(crate) whisper_small_model_dir: PathBuf,
+    pub(crate) whisper_turbo_model_dir: PathBuf,
+    pub(crate) num_threads: i32,
+    pub(crate) provider: String,
+    pub(crate) language: String,
+    pub(crate) use_itn: bool,
+    pub(crate) hotwords_score: f32,
 
     // --- 録音 / ホットキー ---
     /// 押している間だけ録音するキー名 (`alt_r`, `f9`, `ctrl_r` など)。
-    pub hotkey: String,
-    pub paste_modifier: String,
-    pub paste_key: String,
-    pub sample_rate: u32,
-    pub block_size: u32,
+    pub(crate) hotkey: String,
+    pub(crate) paste_modifier: String,
+    pub(crate) paste_key: String,
+    pub(crate) sample_rate: u32,
+    pub(crate) block_size: u32,
     /// 押下直前の音声を巻き戻して含める長さ (ms)。
-    pub pre_roll_ms: u32,
+    pub(crate) pre_roll_ms: u32,
     /// 離した直後の取りこぼしを防ぐため、余分に取得する長さ (ms)。
-    pub tail_grace_ms: u32,
+    pub(crate) tail_grace_ms: u32,
     /// これ未満の押下は破棄する (ms)。
-    pub min_duration_ms: u32,
+    pub(crate) min_duration_ms: u32,
     /// 離下直後の再押下・キーリピートを無視する時間 (ms)。
-    pub repeat_guard_ms: u32,
-    pub ring_seconds: f32,
-    pub device: Option<String>,
+    pub(crate) repeat_guard_ms: u32,
+    pub(crate) ring_seconds: f32,
+    pub(crate) device: Option<String>,
 
     // --- UI / 通知音 ---
-    pub autostart: bool,
-    pub sound_start: bool,
-    pub sound_finish: bool,
-    pub sound_volume: f32,
-    pub sound_theme: SoundTheme,
-    pub floating_bar: bool,
+    pub(crate) autostart: bool,
+    pub(crate) sound_start: bool,
+    pub(crate) sound_finish: bool,
+    pub(crate) sound_volume: f32,
+    pub(crate) sound_theme: SoundTheme,
+    pub(crate) floating_bar: bool,
 
     // --- 音響前処理 ---
-    pub highpass: bool,
-    pub denoise: bool,
+    pub(crate) highpass: bool,
+    pub(crate) denoise: bool,
 
     // --- 貼り付け / クリップボード ---
     /// クリップボード設定後、Ctrl+V を送るまでの待機 (ms)。
-    pub paste_delay_ms: u32,
-    pub restore_clipboard: bool,
-    pub clipboard_restore_delay_ms: u32,
+    pub(crate) paste_delay_ms: u32,
+    pub(crate) restore_clipboard: bool,
+    pub(crate) clipboard_restore_delay_ms: u32,
 
     // --- テキスト整形 ---
-    pub remove_tags: bool,
-    pub remove_ja_spaces: bool,
+    pub(crate) remove_tags: bool,
+    pub(crate) remove_ja_spaces: bool,
     /// ファジーマッチを有効にする (既定 OFF)。
-    pub fuzzy: bool,
+    pub(crate) fuzzy: bool,
     /// words.txt のファジーマッチしきい値 (%)。
-    pub fuzzy_threshold: f64,
+    pub(crate) fuzzy_threshold: f64,
     /// 組み込みの完全一致置換 (replacements.json が優先)。
-    pub replacements: Vec<(String, String)>,
+    pub(crate) replacements: Vec<(String, String)>,
 }
 
 impl Default for Config {
@@ -306,14 +307,14 @@ fn default_replacements() -> Vec<(String, String)> {
 
 impl Config {
     /// hotwords.txt が存在する場合のみ推論エンジンへ渡す。
-    pub fn hotwords_file(&self) -> Option<PathBuf> {
+    pub(crate) fn hotwords_file(&self) -> Option<PathBuf> {
         let path = PathBuf::from(crate::text::HOTWORDS_PATH);
         path.is_file().then_some(path)
     }
 
     /// 選択中のモデルに対応するディレクトリを返す。
     /// `--model-dir` が指定されていればそれを優先する。
-    pub fn model_dir_for(&self, model: &str) -> PathBuf {
+    pub(crate) fn model_dir_for(&self, model: &str) -> PathBuf {
         if let Some(dir) = &self.model_dir_override {
             return dir.clone();
         }
@@ -321,7 +322,7 @@ impl Config {
     }
 
     /// `--model-dir` を無視した、モデル管理用の既定ディレクトリ。
-    pub fn default_model_dir_for(&self, model: &str) -> PathBuf {
+    pub(crate) fn default_model_dir_for(&self, model: &str) -> PathBuf {
         match model {
             "reazonspeech" => self.reazonspeech_model_dir.clone(),
             "whisper-base" => self.whisper_base_model_dir.clone(),
@@ -338,18 +339,18 @@ impl Config {
 /// さらに上書きする。設定画面での変更は即座に保存・反映される。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Settings {
-    pub model: String,
-    pub hotkey: String,
-    pub autostart: bool,
-    pub device: Option<String>,
-    pub language: String,
-    pub num_threads: i32,
-    pub sound_start: bool,
-    pub sound_finish: bool,
-    pub sound_volume: f32,
-    pub sound_theme: String,
-    pub floating_bar: bool,
+pub(crate) struct Settings {
+    pub(crate) model: String,
+    pub(crate) hotkey: String,
+    pub(crate) autostart: bool,
+    pub(crate) device: Option<String>,
+    pub(crate) language: String,
+    pub(crate) num_threads: i32,
+    pub(crate) sound_start: bool,
+    pub(crate) sound_finish: bool,
+    pub(crate) sound_volume: f32,
+    pub(crate) sound_theme: String,
+    pub(crate) floating_bar: bool,
 }
 
 impl Default for Settings {
@@ -361,7 +362,7 @@ impl Default for Settings {
 
 impl Settings {
     /// `config.toml` を読む。戻り値の bool はファイルが存在したか。
-    pub fn load(path: &Path) -> (Self, bool) {
+    pub(crate) fn load(path: &Path) -> (Self, bool) {
         match fs::read_to_string(path) {
             Ok(text) => match toml::from_str(&text) {
                 Ok(settings) => (settings, true),
@@ -385,7 +386,7 @@ impl Settings {
     }
 
     /// 設定を TOML として保存する。
-    pub fn save(&self, path: &Path) -> Result<(), String> {
+    pub(crate) fn save(&self, path: &Path) -> Result<(), String> {
         let text = toml::to_string_pretty(self)
             .map_err(|exc| format!("設定を TOML に変換できません: {exc}"))?;
         fs::write(path, text)
@@ -393,7 +394,7 @@ impl Settings {
     }
 
     /// UI 設定を実行時 [`Config`] へ反映する。
-    pub fn apply_to(&self, config: &mut Config) {
+    pub(crate) fn apply_to(&self, config: &mut Config) {
         if MODEL_IDS.contains(&self.model.as_str()) {
             config.model.clone_from(&self.model);
         }
@@ -416,7 +417,7 @@ impl Settings {
     }
 
     /// 実行時 [`Config`] から保存用の設定を作る。
-    pub fn from_config(config: &Config) -> Self {
+    pub(crate) fn from_config(config: &Config) -> Self {
         Self {
             model: config.model.clone(),
             hotkey: config.hotkey.clone(),
@@ -437,7 +438,7 @@ impl Settings {
 ///
 /// 値が `None` の項目は [`Config::default`] の値を維持する。
 #[derive(Debug, Default)]
-pub struct Cli {
+pub(crate) struct Cli {
     model: Option<String>,
     model_dir: Option<PathBuf>,
     hotkey: Option<String>,
@@ -455,23 +456,23 @@ pub struct Cli {
     restore_clipboard: Option<bool>,
     itn: Option<bool>,
     /// ファジーマッチを有効にする。
-    pub fuzzy: bool,
+    pub(crate) fuzzy: bool,
     /// 入力デバイス一覧を表示して終了する。
-    pub list_devices: bool,
+    pub(crate) list_devices: bool,
     /// テキスト整形の評価ケース JSON。
-    pub eval: Option<PathBuf>,
+    pub(crate) eval: Option<PathBuf>,
     /// 評価時にファジーしきい値をスイープする。
-    pub sweep: bool,
+    pub(crate) sweep: bool,
     /// デバッグログを有効にする。
-    pub debug: bool,
+    pub(crate) debug: bool,
     /// コンソールウィンドウを表示したままにする。
-    pub console: bool,
+    pub(crate) console: bool,
     /// ヘルプを表示して終了する。
-    pub help: bool,
+    pub(crate) help: bool,
 }
 
 /// CLI ヘルプ。`--help` でそのまま表示する。
-pub const HELP: &str = "\
+pub(crate) const HELP: &str = "\
 使い方: mkvoicejp [オプション]
 
 SenseVoice / ReazonSpeech / Whisper を使う Push-to-Talk 音声入力 (Windows)
@@ -508,7 +509,7 @@ SenseVoice / ReazonSpeech / Whisper を使う Push-to-Talk 音声入力 (Windows
 
 impl Cli {
     /// データルートへ移動する前に、相対パス引数を絶対パスへ直す。
-    pub fn resolve_paths(&mut self) {
+    pub(crate) fn resolve_paths(&mut self) {
         self.eval = self
             .eval
             .take()
@@ -524,7 +525,7 @@ impl Cli {
 ///
 /// 値の検証と `--no-*` の解釈だけを行い、`Config` への反映は
 /// [`Config::apply_cli`] が担当する。
-pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
+pub(crate) fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String> {
     let mut cli = Cli::default();
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
@@ -635,7 +636,7 @@ pub fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli, String
 
 impl Config {
     /// CLI で明示された項目だけを `Config` に反映する。
-    pub fn apply_cli(&mut self, cli: &Cli) {
+    pub(crate) fn apply_cli(&mut self, cli: &Cli) {
         if let Some(value) = &cli.model {
             self.model = value.clone();
         }

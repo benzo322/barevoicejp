@@ -157,10 +157,12 @@ impl Shared {
         })
     }
 
+    /// 現在の設定のスナップショットを返す (UI・押下処理用)。
     pub(crate) fn snapshot(&self) -> Config {
         lock(&self.config).clone()
     }
 
+    /// オーバーレイの表示状態を更新する。
     fn set_visual(&self, state: VisualState) {
         self.visual.store(state as u8, Ordering::SeqCst);
     }
@@ -199,6 +201,7 @@ impl Shared {
         info!("辞書を再読み込みしました");
     }
 
+    /// エンジン初期化の結果を共有状態へ反映する。
     fn set_engine_result(&self, result: Result<Engine, String>) -> Option<Engine> {
         self.engine_building.store(false, Ordering::SeqCst);
         match result {
@@ -219,6 +222,7 @@ impl Shared {
         }
     }
 
+    /// エンジンの (準備完了, 初期化中, エラー) を返す。
     pub(crate) fn engine_status(&self) -> (bool, bool, Option<String>) {
         (
             self.engine_ready.load(Ordering::SeqCst),
@@ -227,10 +231,12 @@ impl Shared {
         )
     }
 
-    pub(crate) fn visual_state(&self) -> Arc<AtomicU8> {
-        Arc::clone(&self.visual)
+    /// オーバーレイが参照する表示状態。
+    pub(crate) fn visual_state(&self) -> &Arc<AtomicU8> {
+        &self.visual
     }
 
+    /// 設定画面へ渡す単語辞書 (正式表記, 読み)。
     pub(crate) fn word_entries(&self) -> Vec<(String, Option<String>)> {
         lock(&self.dicts)
             .words
@@ -244,6 +250,7 @@ impl Shared {
             .collect()
     }
 
+    /// 状態機械に合わせて表示状態を揃える。
     fn settle_visual(&self) {
         let state = lock(&self.state).state();
         self.set_visual(match state {
@@ -254,6 +261,7 @@ impl Shared {
         });
     }
 
+    /// ホットキー押下。辞書を更新し、長押し/2回押しを判定して録音を始める。
     fn on_press(&self) {
         // 録音開始前に設定・辞書の変更を確認する。
         self.reload_if_changed();
@@ -299,6 +307,7 @@ impl Shared {
         }
     }
 
+    /// ホットキー離下。長押しなら録音を確定し、短押しなら2回押し待ちへ入る。
     fn on_release(&self) {
         let now = Instant::now();
         let config = self.snapshot();
@@ -334,6 +343,7 @@ impl Shared {
         self.poll_hybrid_at(Instant::now());
     }
 
+    /// 2回押し待ちが期限切れなら短押しとして録音を確定する。
     fn poll_hybrid_at(&self, now: Instant) {
         let pending = {
             let mut guard = lock(&self.pending_tap);
@@ -358,6 +368,7 @@ impl Shared {
         }
     }
 
+    /// 録音を終了し、状態機械の判定結果をログとワーカーへ渡す。
     fn stop_recording_at(&self, now: Instant, position: u64, config: &Config) {
         let tail_samples =
             (config.sample_rate as u64 * config.tail_grace_ms as u64) / config::MS_PER_SECOND;
@@ -401,6 +412,7 @@ impl Shared {
         }
     }
 
+    /// Esc。トグル録音は確定し、長押し中なら破棄する。
     fn on_cancel(&self) {
         let now = Instant::now();
         let config = self.snapshot();
@@ -430,6 +442,7 @@ impl Shared {
         }
     }
 
+    /// ワーカーへエンジン再初期化を依頼する。
     fn request_reconfigure(&self) {
         self.engine_ready.store(false, Ordering::SeqCst);
         self.engine_building.store(true, Ordering::SeqCst);
@@ -438,6 +451,7 @@ impl Shared {
         }
     }
 
+    /// 辞書・ホットワードの更新時刻を見て、変わっていれば再読み込みする。
     fn reload_if_changed(&self) {
         let current = FileMtimes::read();
         let mut mtimes = lock(&self.mtimes);
@@ -445,21 +459,20 @@ impl Shared {
 
         if current.replacements != mtimes.replacements {
             let external = text::load_external_replacements(Path::new(text::REPLACEMENTS_PATH));
-            lock(&self.dicts).external = external.clone();
+            let count = external.len();
+            lock(&self.dicts).external = external;
             mtimes.replacements = text::file_mtime_ns(Path::new(text::REPLACEMENTS_PATH));
             dictionaries_changed = true;
-            info!(
-                "ホットリロード: 置換辞書を再読み込み ({}件)",
-                external.len()
-            );
+            info!("ホットリロード: 置換辞書を再読み込み ({count}件)");
         }
 
         if current.words != mtimes.words {
             let words = text::load_words(Path::new(text::WORDS_PATH));
-            lock(&self.dicts).words = words.clone();
+            let count = words.len();
+            lock(&self.dicts).words = words;
             mtimes.words = text::file_mtime_ns(Path::new(text::WORDS_PATH));
             dictionaries_changed = true;
-            info!("ホットリロード: 単語辞書を再読み込み ({}件)", words.len());
+            info!("ホットリロード: 単語辞書を再読み込み ({count}件)");
         }
 
         if dictionaries_changed {
@@ -474,17 +487,18 @@ impl Shared {
         }
     }
 
+    /// 辞書と設定から整形器を作り直す。
     fn rebuild_formatter(&self) {
-        let (external, words) = {
-            let dicts = lock(&self.dicts);
-            (dicts.external.clone(), dicts.words.clone())
-        };
         let config = self.snapshot();
-        let formatter = build_formatter(&config, &external, &words);
+        let formatter = {
+            let dicts = lock(&self.dicts);
+            build_formatter(&config, &dicts.external, &dicts.words)
+        };
         *lock(&self.formatter) = formatter;
     }
 }
 
+/// 組み込み置換と外部辞書を合成して整形器を構築する。
 fn build_formatter(
     config: &Config,
     external: &[(String, String)],
@@ -510,7 +524,7 @@ fn build_formatter(
 ///
 /// 生成時にワーカースレッドを起動し、`run()` で設定画面とトレイを含む
 /// イベントループへ入る。
-pub struct App {
+pub(crate) struct App {
     shared: Arc<Shared>,
     worker: Option<JoinHandle<()>>,
     ring: Arc<Mutex<RingBuffer>>,
@@ -522,7 +536,7 @@ pub struct App {
 impl App {
     /// ワーカーを起動する。`engine` の所有権はワーカーへ移る。
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         config: Config,
         engine: Option<Engine>,
         engine_error: Option<String>,
@@ -559,23 +573,26 @@ impl App {
         })
     }
 
-    pub fn shared(&self) -> &Arc<Shared> {
+    /// ワーカーと UI が共有する状態。
+    pub(crate) fn shared(&self) -> &Arc<Shared> {
         &self.shared
     }
 
-    pub fn level(&self) -> Arc<AtomicU32> {
-        Arc::clone(&self.level)
+    /// マイク入力レベル (UI が毎ティック読む)。所有権は増やさない。
+    pub(crate) fn level(&self) -> &Arc<AtomicU32> {
+        &self.level
     }
 
-    pub fn capture_error(&self) -> Option<String> {
-        self.capture_error.clone()
+    /// マイクを開けなかった理由。開けていれば `None`。
+    pub(crate) fn capture_error(&self) -> Option<&str> {
+        self.capture_error.as_deref()
     }
 
     /// マイクを開き直す。既存のリングバッファとレベルは再利用する。
     ///
     /// デバイス切替直後は旧ストリームの解放が完了しておらず、開き直しに
     /// 失敗することがあるため、短い間隔で数回再試行する。
-    pub fn restart_capture(&mut self, config: &Config) -> Result<(), String> {
+    pub(crate) fn restart_capture(&mut self, config: &Config) -> Result<(), String> {
         self.capture = None;
         self.level.store(0.0f32.to_bits(), Ordering::Relaxed);
         let mut last_error = None;
@@ -599,24 +616,28 @@ impl App {
         Err(exc)
     }
 
-    pub fn apply_config(&self, config: Config) {
+    /// 設定画面の変更を反映する (必要ならエンジンを再初期化)。
+    pub(crate) fn apply_config(&self, config: Config) {
         self.shared.update_config(config);
     }
 
-    pub fn reconfigure(&self) {
+    /// モデル変更後にエンジンを作り直す。
+    pub(crate) fn reconfigure(&self) {
         self.shared.request_reconfigure();
     }
 
-    pub fn poll_hybrid(&self) {
+    /// 2回押し待ちの期限を確認する (UI ティックから呼ぶ)。
+    pub(crate) fn poll_hybrid(&self) {
         self.shared.poll_hybrid();
     }
 
-    pub fn reload_dictionaries(&self) {
+    /// 辞書ファイルを即座に再読み込みする。
+    pub(crate) fn reload_dictionaries(&self) {
         self.shared.reload_dictionaries();
     }
 
     /// ワーカーとマイクを停止する。UI 終了時に一度だけ呼ぶ。
-    pub fn shutdown(&mut self) {
+    pub(crate) fn shutdown(&mut self) {
         self.capture = None;
         let _ = self.shared.tx.send(Job::Shutdown);
         if let Some(worker) = self.worker.take() {
@@ -626,7 +647,7 @@ impl App {
     }
 
     /// キーボードフックを設置し、設定画面のイベントループへ入る。
-    pub fn run(mut self) -> ! {
+    pub(crate) fn run(mut self) -> ! {
         let config = self.shared.snapshot();
         let hotkey = match win::parse_hotkey(&config.hotkey) {
             Ok(hotkey) => hotkey,

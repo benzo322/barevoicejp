@@ -322,7 +322,7 @@ impl Drop for ResultGuard {
 // エンジン
 // ---------------------------------------------------------------------------
 /// SenseVoice / ReazonSpeech / Whisper のオフライン認識エンジン。
-pub struct Engine {
+pub(crate) struct Engine {
     recognizer: Recognizer,
     sample_rate: i32,
     hotwords_supported: bool,
@@ -330,7 +330,7 @@ pub struct Engine {
 
 impl Engine {
     /// 設定に応じてモデルを読み込み、認識器を初期化する。
-    pub fn build(config: &Config) -> Result<Self, String> {
+    pub(crate) fn build(config: &Config) -> Result<Self, String> {
         match config.model.as_str() {
             "sensevoice" => Self::sense_voice(config),
             "reazonspeech" => Self::reazonspeech(config),
@@ -343,12 +343,12 @@ impl Engine {
     }
 
     /// SenseVoice のホットワードが有効に初期化できたか。
-    pub fn supports_hotwords(&self) -> bool {
+    pub(crate) fn supports_hotwords(&self) -> bool {
         self.hotwords_supported
     }
 
     /// 16kHz / mono / float32 の波形を文字起こしする。
-    pub fn transcribe(&self, samples: &[f32]) -> String {
+    pub(crate) fn transcribe(&self, samples: &[f32]) -> String {
         if samples.is_empty() {
             return String::new();
         }

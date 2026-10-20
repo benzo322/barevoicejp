@@ -46,7 +46,7 @@ const MENU_EXIT: usize = 1003;
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
 
 /// トレイアイコンを削除してトレイスレッドを終了させる。
-pub fn shutdown() {
+pub(crate) fn shutdown() {
     let hwnd = TRAY_HWND.load(Ordering::SeqCst);
     if hwnd != 0 {
         // SAFETY: hwnd はトレイスレッドが作成した隠しウィンドウ。
@@ -58,7 +58,7 @@ pub fn shutdown() {
 }
 
 /// トレイスレッドを起動し、アイコン登録が終わるまで待つ。
-pub fn spawn(proxy: EventLoopProxy<UiEvent>) -> Result<(), String> {
+pub(crate) fn spawn(proxy: EventLoopProxy<UiEvent>) -> Result<(), String> {
     let (ready_tx, ready_rx) = mpsc::channel();
     std::thread::Builder::new()
         .name("mkvoicejp-tray".to_string())
@@ -72,11 +72,13 @@ pub fn spawn(proxy: EventLoopProxy<UiEvent>) -> Result<(), String> {
     }
 }
 
+/// トレイスレッドが所有するアイコンとイベント送信先。
 struct TrayCtx {
     proxy: EventLoopProxy<UiEvent>,
     icon: HICON,
 }
 
+/// 失敗理由を起動待ちの呼び出し元へ伝えてから終了する。
 fn run(
     proxy: EventLoopProxy<UiEvent>,
     ready: mpsc::Sender<Result<(), String>>,
@@ -390,6 +392,7 @@ fn create_icon() -> HICON {
     }
 }
 
+/// グラデーション背景にマイクを描く。
 fn draw_icon(pixmap: &mut Pixmap, size: f32) {
     let mut builder = PathBuilder::new();
     let radius = size * 0.28;
@@ -502,6 +505,7 @@ fn draw_icon(pixmap: &mut Pixmap, size: f32) {
     }
 }
 
+/// 角丸長方形のパスを作る。
 fn rounded_rect(rect: tiny_skia::Rect, radius: f32) -> Option<tiny_skia::Path> {
     let r = radius.min(rect.width() * 0.5).min(rect.height() * 0.5);
     let k = 0.552_284_8 * r;

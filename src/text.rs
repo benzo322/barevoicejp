@@ -15,9 +15,9 @@ use crate::config::{
 };
 
 /// 辞書ファイルの置き場所 (カレントディレクトリ基準)。
-pub const REPLACEMENTS_PATH: &str = "replacements.json";
-pub const HOTWORDS_PATH: &str = "hotwords.txt";
-pub const WORDS_PATH: &str = "words.txt";
+pub(crate) const REPLACEMENTS_PATH: &str = "replacements.json";
+pub(crate) const HOTWORDS_PATH: &str = "hotwords.txt";
+pub(crate) const WORDS_PATH: &str = "words.txt";
 const HOTWORDS_TEMPLATE: &str = "GitHub Actions\nDocker\nAPI\n";
 const WORDS_TEMPLATE: &str = "\
 # 正式表記 : 代表読み
@@ -38,17 +38,17 @@ const PARTICLES: [char; 9] = ['で', 'に', 'を', 'は', 'が', 'の', 'と', '
 /// コロン無しの英字は `reading = None` (完全一致のみ)、
 /// 日本語は語自体を読みとして扱う。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WordEntry {
+pub(crate) struct WordEntry {
     target: String,
     reading: Option<String>,
 }
 
 impl WordEntry {
-    pub fn target(&self) -> &str {
+    pub(crate) fn target(&self) -> &str {
         &self.target
     }
 
-    pub fn reading(&self) -> Option<&str> {
+    pub(crate) fn reading(&self) -> Option<&str> {
         self.reading.as_deref()
     }
 }
@@ -117,7 +117,7 @@ fn read_utf8_bom(path: &Path) -> Option<String> {
 }
 
 /// ファイルの更新時刻。存在しない・取得できない場合は `None`。
-pub fn file_mtime_ns(path: &Path) -> Option<SystemTime> {
+pub(crate) fn file_mtime_ns(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|meta| meta.modified()).ok()
 }
 
@@ -125,7 +125,7 @@ pub fn file_mtime_ns(path: &Path) -> Option<SystemTime> {
 // 辞書ファイル
 // ---------------------------------------------------------------------------
 /// hotwords.txt が無ければサンプルを生成する。
-pub fn ensure_hotwords_file(path: &Path) {
+pub(crate) fn ensure_hotwords_file(path: &Path) {
     if path.exists() {
         return;
     }
@@ -139,7 +139,7 @@ pub fn ensure_hotwords_file(path: &Path) {
 }
 
 /// words.txt が無ければサンプルを生成する。
-pub fn ensure_words_file(path: &Path) {
+pub(crate) fn ensure_words_file(path: &Path) {
     if path.exists() {
         return;
     }
@@ -153,7 +153,7 @@ pub fn ensure_words_file(path: &Path) {
 }
 
 /// hotwords.txt の空行を除いた行数。
-pub fn count_hotwords(path: &Path) -> usize {
+pub(crate) fn count_hotwords(path: &Path) -> usize {
     let Some(text) = read_utf8_bom(path) else {
         return 0;
     };
@@ -186,7 +186,7 @@ fn parse_word_line(line: &str) -> Option<(String, Option<String>)> {
 }
 
 /// 設定画面から単語を 1 件追加する。
-pub fn add_word(path: &Path, target: &str, reading: &str) -> Result<(), String> {
+pub(crate) fn add_word(path: &Path, target: &str, reading: &str) -> Result<(), String> {
     let target = target.trim();
     let reading = reading.trim();
     if target.is_empty() || reading.is_empty() {
@@ -216,7 +216,11 @@ pub fn add_word(path: &Path, target: &str, reading: &str) -> Result<(), String> 
 }
 
 /// 設定画面から単語を 1 件削除する。コメントと他の行はそのまま残す。
-pub fn remove_word(path: &Path, target: &str, reading: Option<&str>) -> Result<usize, String> {
+pub(crate) fn remove_word(
+    path: &Path,
+    target: &str,
+    reading: Option<&str>,
+) -> Result<usize, String> {
     let Some(text) = read_utf8_bom(path) else {
         return Ok(0);
     };
@@ -242,7 +246,7 @@ pub fn remove_word(path: &Path, target: &str, reading: Option<&str>) -> Result<u
 }
 
 /// `replacements.json` を読み込む。存在しなければ空のテンプレートを生成する。
-pub fn load_external_replacements(path: &Path) -> Vec<(String, String)> {
+pub(crate) fn load_external_replacements(path: &Path) -> Vec<(String, String)> {
     if !path.exists() {
         if let Err(exc) = fs::write(path, "{}\n") {
             crate::warn!(
@@ -301,7 +305,7 @@ fn is_ascii_word(text: &str) -> bool {
 ///
 /// 形式は `正式表記 : 代表読み`。コロン無しの英字は完全一致のみ、
 /// 日本語は語自体を読みとして扱う。重複行は無視する。
-pub fn load_words(path: &Path) -> Vec<WordEntry> {
+pub(crate) fn load_words(path: &Path) -> Vec<WordEntry> {
     let Some(text) = read_utf8_bom(path) else {
         return Vec::new();
     };
@@ -365,7 +369,7 @@ pub fn load_words(path: &Path) -> Vec<WordEntry> {
 /// タグ除去 → 空白正規化 → 完全一致置換 → ファジー置換 →
 /// 英日境界補正、の順に適用する。完全一致を先に適用することで、
 /// 登録済みの読みが別語のファジー一致に奪われない。
-pub struct TextFormatter {
+pub(crate) struct TextFormatter {
     remove_tags: bool,
     remove_ja_spaces: bool,
     fuzzy: bool,
@@ -382,7 +386,7 @@ impl TextFormatter {
     /// `fuzzy` が false のときは完全一致だけを適用する。
     /// `fuzzy_threshold` は 0–100 に丸められる。読みと正式表記が
     /// [`FUZZY_MIN_CHARS`] 未満の項目はファジー対象外。
-    pub fn new(
+    pub(crate) fn new(
         replacements: &[(String, String)],
         words: &[WordEntry],
         fuzzy_threshold: f64,
@@ -447,7 +451,7 @@ impl TextFormatter {
     }
 
     /// 生の認識結果を整形して返す。空入力は空文字列。
-    pub fn format(&self, text: &str) -> String {
+    pub(crate) fn format(&self, text: &str) -> String {
         if text.is_empty() {
             return String::new();
         }
@@ -463,18 +467,24 @@ impl TextFormatter {
         }
         // 完全一致を先に適用し、登録済みの読みがファジー一致に奪われないようにする。
         for (key, target) in &self.replacements {
-            text = replace_all_with_boundaries(&text, key, target);
+            // 含まれないキーでは文字列を作り直さない。
+            if text.contains(key) {
+                text = replace_all_with_boundaries(&text, key, target);
+            }
         }
-        if self.fuzzy {
-            text = self.apply_fuzzy(&text);
+        if self.fuzzy
+            && let Some(replaced) = self.apply_fuzzy(&text)
+        {
+            text = replaced;
         }
         text = normalize_ascii_japanese_boundaries(&text);
         text.trim().to_string()
     }
 
-    fn apply_fuzzy(&self, text: &str) -> String {
-        if !self.fuzzy || self.fuzzy_entries.is_empty() || text.is_empty() {
-            return text.to_string();
+    /// ファジー一致で置換した文字列を返す。置換が無ければ `None`。
+    fn apply_fuzzy(&self, text: &str) -> Option<String> {
+        if self.fuzzy_entries.is_empty() || text.is_empty() {
+            return None;
         }
         let text_chars: Vec<char> = text.chars().collect();
         let text_len = text_chars.len();
@@ -534,7 +544,7 @@ impl TextFormatter {
         }
 
         if candidates.is_empty() {
-            return text.to_string();
+            return None;
         }
 
         // 登録読みが長い単語を優先し、次にマッチ長、類似度、開始位置の早い順。
@@ -561,7 +571,7 @@ impl TextFormatter {
         }
 
         if selected.is_empty() {
-            return text.to_string();
+            return None;
         }
         selected.sort_by_key(|item| item.0);
 
@@ -573,7 +583,7 @@ impl TextFormatter {
             position = end;
         }
         out.extend(&text_chars[position..]);
-        out
+        Some(out)
     }
 }
 
@@ -612,6 +622,7 @@ fn partial_ratio_alignment(reading: &[char], text: &[char]) -> Option<(f64, usiz
     best
 }
 
+/// 編集距離を文字数の和で正規化した類似度 (0–100)。
 fn ratio(left: &[char], right: &[char]) -> f64 {
     if left.is_empty() || right.is_empty() {
         return 0.0;
@@ -624,6 +635,7 @@ fn ratio(left: &[char], right: &[char]) -> f64 {
     100.0 * (1.0 - distance / total)
 }
 
+/// 置換語の前後が英日境界なら、読みやすさのため空白を補う。
 fn with_boundary_spaces(text: &[char], start: usize, end: usize, replacement: &str) -> String {
     if replacement.is_empty() {
         return String::new();
@@ -649,6 +661,7 @@ fn with_boundary_spaces(text: &[char], start: usize, end: usize, replacement: &s
     out
 }
 
+/// 文字単位で全出現を置換し、英日境界の空白を補う。
 fn replace_all_with_boundaries(text: &str, key: &str, target: &str) -> String {
     if key.is_empty() {
         return text.to_string();
@@ -677,6 +690,7 @@ fn replace_all_with_boundaries(text: &str, key: &str, target: &str) -> String {
     out
 }
 
+/// `<|...|>` 形式のモデルタグを除去する。
 fn remove_tags(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
@@ -699,6 +713,7 @@ fn remove_tags(text: &str) -> String {
     out
 }
 
+/// `<s>` / `</s>` / `<unk>` などの特殊トークンを除去する。
 fn remove_special_tokens(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
@@ -733,6 +748,7 @@ fn remove_special_tokens(text: &str) -> String {
     out
 }
 
+/// 連続する空白を 1 つへ畳み、前後の空白を落とす。
 fn collapse_whitespace(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_whitespace = false;
@@ -750,6 +766,7 @@ fn collapse_whitespace(text: &str) -> String {
     out.trim().to_string()
 }
 
+/// 日本語同士の間にある空白だけを取り除く。
 fn remove_ja_spaces(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out: Vec<char> = Vec::with_capacity(chars.len());
@@ -777,32 +794,22 @@ fn remove_ja_spaces(text: &str) -> String {
     out.into_iter().collect()
 }
 
+/// 英字と日本語の境界に半角スペースを補い、連続する空白を 1 つに畳む。
 fn normalize_ascii_japanese_boundaries(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len() + 8);
     for (index, &c) in chars.iter().enumerate() {
-        out.push(c);
+        // ` {2,}` -> " " と同じ (タブ等は既に空白へ畳まれている)。
+        if c != ' ' || !out.ends_with(' ') {
+            out.push(c);
+        }
         if let Some(&next) = chars.get(index + 1)
             && ((is_ascii_alpha(c) && is_ja_char(next)) || (is_ja_char(c) && is_ascii_alpha(next)))
         {
             out.push(' ');
         }
     }
-    // ` {2,}` -> " " と同じ (タブ等は既に空白へ畳まれている)。
-    let mut collapsed = String::with_capacity(out.len());
-    let mut previous_space = false;
-    for c in out.chars() {
-        if c == ' ' {
-            if !previous_space {
-                collapsed.push(c);
-            }
-            previous_space = true;
-        } else {
-            collapsed.push(c);
-            previous_space = false;
-        }
-    }
-    collapsed
+    out
 }
 
 #[cfg(test)]

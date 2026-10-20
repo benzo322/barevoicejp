@@ -28,7 +28,7 @@ use crate::tray;
 use crate::win;
 
 /// トレイ・ワーカー・IPC からメインスレッドへ送るイベント。
-pub enum UiEvent {
+pub(crate) enum UiEvent {
     ShowSettings,
     ReloadDictionaries,
     Ipc(String),
@@ -37,6 +37,7 @@ pub enum UiEvent {
     Quit,
 }
 
+/// 設定画面に一度だけ表示する通知。
 struct Notice {
     id: u64,
     kind: &'static str,
@@ -44,7 +45,7 @@ struct Notice {
 }
 
 /// 設定画面とトレイを起動し、終了までイベントループを回す。
-pub fn run(mut app: App) -> ! {
+pub(crate) fn run(mut app: App) -> ! {
     let mut settings = Settings::from_config(&app.shared().snapshot());
     let first_run = !Path::new(config::CONFIG_PATH).exists();
 
@@ -101,8 +102,8 @@ pub fn run(mut app: App) -> ! {
 
     let enabled = Arc::new(AtomicBool::new(settings.floating_bar));
     let _overlay = match Overlay::new(
-        app.level(),
-        app.shared().visual_state(),
+        Arc::clone(app.level()),
+        Arc::clone(app.shared().visual_state()),
         Arc::clone(&enabled),
         proxy.clone(),
     ) {
@@ -211,6 +212,7 @@ pub fn run(mut app: App) -> ! {
     });
 }
 
+/// 設定画面を中央へ出し、最前面へ持ってくる。
 fn show_window(window: &Window) {
     window.set_minimized(false);
     center_window(window);
@@ -235,6 +237,7 @@ fn center_window(window: &Window) {
     window.set_outer_position(PhysicalPosition::new(x, y));
 }
 
+/// 連番付きの通知をセットする (同じ文面でも再表示できる)。
 fn set_notice(notice: &mut Option<Notice>, id: &mut u64, kind: &'static str, message: &str) {
     *id += 1;
     *notice = Some(Notice {
@@ -244,6 +247,7 @@ fn set_notice(notice: &mut Option<Notice>, id: &mut u64, kind: &'static str, mes
     });
 }
 
+/// 設定画面からの JSON コマンドを処理する。
 #[allow(clippy::too_many_arguments)]
 fn handle_ipc(
     message: &str,
@@ -357,6 +361,7 @@ fn handle_ipc(
     }
 }
 
+/// 設定を検証して反映し、マイク・ホットキー・自動起動へ同期する。
 fn save_settings(
     value: Value,
     app: &mut App,
@@ -386,7 +391,6 @@ fn save_settings(
     next.apply_to(&mut config);
     let mut applied = Settings::from_config(&config);
 
-    app.apply_config(config.clone());
     if applied.hotkey != previous.hotkey {
         win::set_hotkey(hotkey);
     }
@@ -417,6 +421,8 @@ fn save_settings(
         );
         return;
     }
+    // マイクを開き直せた場合だけ、共有設定へ反映する。
+    app.apply_config(config);
 
     if let Err(exc) = applied.save(Path::new(config::CONFIG_PATH)) {
         set_notice(notice, notice_id, "error", &exc);
@@ -436,6 +442,7 @@ fn open_in_notepad(path: &str, notice: &mut Option<Notice>, notice_id: &mut u64)
     }
 }
 
+/// 入力レベルだけを JS へ送る (ティックごとの軽量更新)。
 fn push_level(webview: &WebView, app: &App) {
     let level = f32::from_bits(app.level().load(Ordering::Relaxed));
     if let Err(exc) = webview.evaluate_script(&format!(
@@ -445,6 +452,7 @@ fn push_level(webview: &WebView, app: &App) {
     }
 }
 
+/// 設定・モデル・辞書などの全体状態を JS へ送る。
 fn push_state(webview: &WebView, app: &App, settings: &Settings, notice: &Option<Notice>) {
     let payload = snapshot(app, settings, notice);
     let text = payload
@@ -458,6 +466,7 @@ fn push_state(webview: &WebView, app: &App, settings: &Settings, notice: &Option
     }
 }
 
+/// JS の `apply()` に渡す JSON を組み立てる。
 fn snapshot(app: &App, settings: &Settings, notice: &Option<Notice>) -> Value {
     let shared = app.shared();
     let config = shared.snapshot();

@@ -14,14 +14,14 @@ use crate::config::Config;
 use crate::text::{self, TextFormatter, WordEntry};
 
 /// スイープで比較するファジーしきい値 (%)。
-pub const SWEEP_THRESHOLDS: [f64; 4] = [70.0, 75.0, 80.0, 85.0];
+const SWEEP_THRESHOLDS: [f64; 4] = [70.0, 75.0, 80.0, 85.0];
 
 /// 評価対象の 1 ケース。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EvalCase {
-    pub category: String,
-    pub input: String,
-    pub expected: String,
+struct EvalCase {
+    category: String,
+    input: String,
+    expected: String,
 }
 
 /// 1 ケースの実行結果。
@@ -70,7 +70,7 @@ impl ThresholdResult {
 /// 評価を実行し、プロセス終了コードを返す。
 ///
 /// 既定しきい値で全ケース合格なら 0、失敗があれば 1。
-pub fn run(path: &Path, sweep: bool, config: &Config) -> i32 {
+pub(crate) fn run(path: &Path, sweep: bool, config: &Config) -> i32 {
     let cases = match load_cases(path) {
         Ok(cases) => cases,
         Err(exc) => {
@@ -133,6 +133,7 @@ pub fn run(path: &Path, sweep: bool, config: &Config) -> i32 {
     }
 }
 
+/// 評価用の整形器を、指定したしきい値とファジー設定で作る。
 fn build_formatter(
     config: &Config,
     replacements: &[(String, String)],
@@ -150,6 +151,7 @@ fn build_formatter(
     )
 }
 
+/// 全ケースを整形し、合否と誤爆フラグを付けて返す。
 fn evaluate(cases: &[EvalCase], formatter: &TextFormatter) -> Vec<Outcome> {
     cases
         .iter()
@@ -167,6 +169,7 @@ fn evaluate(cases: &[EvalCase], formatter: &TextFormatter) -> Vec<Outcome> {
         .collect()
 }
 
+/// カテゴリ別の正解率と失敗ケースを出力する。
 fn print_report(threshold: f64, outcomes: &[Outcome]) {
     let total = outcomes.len();
     let passed = outcomes.iter().filter(|outcome| outcome.pass).count();
@@ -212,6 +215,7 @@ fn print_report(threshold: f64, outcomes: &[Outcome]) {
     }
 }
 
+/// しきい値を変えながら誤爆と表記揺れ救出数を比較する。
 fn print_sweep(
     cases: &[EvalCase],
     replacements: &[(String, String)],
@@ -328,6 +332,7 @@ fn diff_summary(expected: &str, actual: &str) -> String {
     )
 }
 
+/// 評価ケース JSON を BOM 許容で読み込む。
 fn load_cases(path: &Path) -> Result<Vec<EvalCase>, String> {
     let bytes = fs::read(path).map_err(|exc| exc.to_string())?;
     let text = match bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
@@ -337,6 +342,7 @@ fn load_cases(path: &Path) -> Result<Vec<EvalCase>, String> {
     parse_cases(&text)
 }
 
+/// JSON 配列を `EvalCase` へ変換し、必須フィールドを検証する。
 fn parse_cases(text: &str) -> Result<Vec<EvalCase>, String> {
     let value: Value = serde_json::from_str(text).map_err(|exc| exc.to_string())?;
     let array = value

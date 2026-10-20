@@ -21,14 +21,14 @@ const RESAMPLER_RESERVE_SAMPLES: usize = 2;
 /// 常時書き込みの固定長リングバッファ。
 ///
 /// `position()` は累積サンプル数を返すため、押下位置からの巻き戻しに使える。
-pub struct RingBuffer {
+pub(crate) struct RingBuffer {
     buffer: Vec<f32>,
     total: u64,
 }
 
 impl RingBuffer {
     /// 指定サンプル数 (最低 1) のバッファを作る。
-    pub fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         Self {
             buffer: vec![0.0; capacity.max(1)],
             total: 0,
@@ -36,18 +36,18 @@ impl RingBuffer {
     }
 
     /// これまでに書き込んだ総サンプル数。
-    pub fn position(&self) -> u64 {
+    pub(crate) fn position(&self) -> u64 {
         self.total
     }
 
     /// 内容と累積位置をリセットする (マイク再起動時)。
-    pub fn clear(&mut self) {
+    fn clear(&mut self) {
         self.buffer.fill(0.0);
         self.total = 0;
     }
 
     /// 末尾にサンプルを追加する。容量を超えた分は古いものから捨てる。
-    pub fn push(&mut self, samples: &[f32]) {
+    fn push(&mut self, samples: &[f32]) {
         let incoming = samples.len();
         if incoming == 0 {
             return;
@@ -71,7 +71,7 @@ impl RingBuffer {
 
     /// 絶対サンプル番号 `[start, end)` をコピーして返す。
     /// 保持範囲外は切り詰める (足りない場合は警告ログ)。
-    pub fn read(&self, start_sample: u64, end_sample: u64) -> Vec<f32> {
+    pub(crate) fn read(&self, start_sample: u64, end_sample: u64) -> Vec<f32> {
         let capacity = self.buffer.len();
         let oldest = self.total.saturating_sub(capacity as u64);
         let start = start_sample.max(oldest);
@@ -122,6 +122,7 @@ impl LinearResampler {
         }
     }
 
+    /// 入力を出力レートへ変換し、`out` を置き換える。
     fn process_into(&mut self, input: &[f32], out: &mut Vec<f32>) {
         out.clear();
         if input.is_empty() {
@@ -158,7 +159,7 @@ impl LinearResampler {
 ///
 /// `cpal::Stream` は `Send` ではないため、この構造体はメインスレッドで保持する。
 /// ワーカーは [`AudioCapture::ring`] の `Arc` 経由でサンプルを読む。
-pub struct AudioCapture {
+pub(crate) struct AudioCapture {
     xruns: Arc<AtomicU64>,
     /// ストリームを生かしておくためだけに保持する。
     _stream: cpal::Stream,
@@ -169,7 +170,7 @@ impl AudioCapture {
     ///
     /// `ring` と `level` は呼び出し側が用意する。設定画面からマイクを
     /// 切り替えるときも同じバッファを再利用する。
-    pub fn start(
+    pub(crate) fn start(
         config: &Config,
         ring: Arc<Mutex<RingBuffer>>,
         level: Arc<AtomicU32>,
@@ -279,11 +280,12 @@ impl AudioCapture {
     }
 
     /// ストリームエラー回数。デバッグログ用。
-    pub fn xruns(&self) -> Arc<AtomicU64> {
+    pub(crate) fn xruns(&self) -> Arc<AtomicU64> {
         Arc::clone(&self.xruns)
     }
 }
 
+/// 要求レートで開ける mono/f32 設定を優先し、無ければ既定設定を使う。
 fn choose_config(device: &cpal::Device, rate: u32) -> Result<cpal::SupportedStreamConfig, String> {
     if let Ok(ranges) = device.supported_input_configs() {
         for range in ranges {
@@ -301,6 +303,7 @@ fn choose_config(device: &cpal::Device, rate: u32) -> Result<cpal::SupportedStre
         .map_err(|exc| format!("入力デバイスの既定設定を取得できません: {exc}"))
 }
 
+/// 番号または名前の一部から入力デバイスを選ぶ。未指定なら既定デバイス。
 fn select_device(host: &cpal::Host, spec: Option<&str>) -> Result<cpal::Device, String> {
     let Some(spec) = spec else {
         return host.default_input_device().ok_or_else(|| {
@@ -447,7 +450,7 @@ where
 /// 2 次バターワースハイパス (scipy の `butter(2, cutoff, "highpass")` 相当)。
 ///
 /// 発話ごとに状態をリセットして適用する (フィルタはステートレスに呼ぶ)。
-pub fn highpass(samples: &mut [f32], sample_rate: f64, cutoff_hz: f64) {
+pub(crate) fn highpass(samples: &mut [f32], sample_rate: f64, cutoff_hz: f64) {
     if samples.is_empty() {
         return;
     }
@@ -477,21 +480,21 @@ pub fn highpass(samples: &mut [f32], sample_rate: f64, cutoff_hz: f64) {
 // デバイス一覧
 // ---------------------------------------------------------------------------
 /// 設定画面へ渡す入力デバイス。
-pub struct InputDeviceInfo {
-    pub name: String,
-    pub is_default: bool,
+pub(crate) struct InputDeviceInfo {
+    pub(crate) name: String,
+    pub(crate) is_default: bool,
 }
 
 /// 設定画面向けの入力デバイス一覧と、Windows の既定デバイス名。
 ///
 /// `devices` の並び順は `select_device` の番号指定と一致する。
-pub struct InputDeviceList {
-    pub default_name: Option<String>,
-    pub devices: Vec<InputDeviceInfo>,
+pub(crate) struct InputDeviceList {
+    pub(crate) default_name: Option<String>,
+    pub(crate) devices: Vec<InputDeviceInfo>,
 }
 
 /// 入力デバイスと既定デバイス名を列挙する。
-pub fn input_device_list() -> InputDeviceList {
+pub(crate) fn input_device_list() -> InputDeviceList {
     let host = cpal::default_host();
     let default_name = host
         .default_input_device()
@@ -528,7 +531,7 @@ pub fn input_device_list() -> InputDeviceList {
 /// 入力可能なデバイスを列挙して標準出力へ表示する。
 ///
 /// 戻り値はプロセス終了コード (1 台以上見つかれば 0)。
-pub fn list_input_devices() -> i32 {
+pub(crate) fn list_input_devices() -> i32 {
     let host = cpal::default_host();
     let default_name = host
         .default_input_device()

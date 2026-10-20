@@ -8,7 +8,7 @@ static DEBUG: AtomicBool = AtomicBool::new(false);
 
 /// ログ種別。`Debug` は `--debug` 指定時のみ出力する。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Level {
+pub(crate) enum Level {
     Debug,
     Info,
     Warn,
@@ -16,7 +16,7 @@ pub enum Level {
 }
 
 /// デバッグログの出力可否を設定する。
-pub fn init(debug: bool) {
+pub(crate) fn init(debug: bool) {
     DEBUG.store(debug, Ordering::Relaxed);
 }
 
@@ -25,7 +25,7 @@ fn enabled(level: Level) -> bool {
 }
 
 /// 1 行ログを stderr へ出力する。マクロ経由で呼ぶ。
-pub fn log(level: Level, args: std::fmt::Arguments<'_>) {
+pub(crate) fn log(level: Level, args: std::fmt::Arguments<'_>) {
     if !enabled(level) {
         return;
     }

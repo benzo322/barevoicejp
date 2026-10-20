@@ -13,13 +13,13 @@ use crate::config::SoundTheme;
 
 /// 再生する通知音。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Cue {
+pub(crate) enum Cue {
     Start,
     Finish,
 }
 
 /// テーマと種類ごとの長さ。
-pub fn duration(theme: SoundTheme, cue: Cue) -> f32 {
+fn duration(theme: SoundTheme, cue: Cue) -> f32 {
     match (theme, cue) {
         (SoundTheme::Soft, Cue::Start) => 0.45,
         (SoundTheme::Soft, Cue::Finish) => 0.95,
@@ -32,6 +32,7 @@ pub fn duration(theme: SoundTheme, cue: Cue) -> f32 {
     }
 }
 
+/// 0–1 を滑らかに補間する。
 fn smoothstep(value: f32) -> f32 {
     let value = value.clamp(0.0, 1.0);
     value * value * (3.0 - 2.0 * value)
@@ -43,6 +44,7 @@ fn hann_attack(t: f32, seconds: f32) -> f32 {
     0.5 - 0.5 * (std::f32::consts::PI * value).cos()
 }
 
+/// サンプル位置を 0–1 の進捗へ変換する。
 fn progress(index: usize, count: usize) -> f32 {
     if count > 1 {
         index as f32 / (count - 1) as f32
@@ -51,12 +53,13 @@ fn progress(index: usize, count: usize) -> f32 {
     }
 }
 
+/// 末尾 `seconds` 秒で 0 へ向かうリリース係数。
 fn release(progress: f32, duration: f32, seconds: f32) -> f32 {
     smoothstep(((1.0 - progress) * duration) / seconds)
 }
 
 /// 通知音を合成する。値域は -1.0..=1.0。
-pub fn synthesize(theme: SoundTheme, cue: Cue, sample_rate: u32, volume: f32) -> Vec<f32> {
+fn synthesize(theme: SoundTheme, cue: Cue, sample_rate: u32, volume: f32) -> Vec<f32> {
     let rate = sample_rate.max(8_000) as f32;
     let duration = duration(theme, cue);
     let count = (duration * rate) as usize;
@@ -147,7 +150,7 @@ pub fn synthesize(theme: SoundTheme, cue: Cue, sample_rate: u32, volume: f32) ->
 }
 
 /// 通知音を非同期に再生する。音声デバイスが無い場合は静かに諦める。
-pub fn play(theme: SoundTheme, cue: Cue, volume: f32) {
+pub(crate) fn play(theme: SoundTheme, cue: Cue, volume: f32) {
     if volume <= 0.0 {
         return;
     }
@@ -186,6 +189,7 @@ pub fn play(theme: SoundTheme, cue: Cue, volume: f32) {
         .ok();
 }
 
+/// サンプル列をデバイスの形式へ変換して再生するストリームを作る。
 fn build<T, F>(
     device: &cpal::Device,
     config: &cpal::SupportedStreamConfig,

@@ -20,10 +20,12 @@ const LABELS = {
   esc: "Esc", enter: "Enter", space: "Space", tab: "Tab"
 };
 
+// Rust 側へ JSON コマンドを送る。
 function ipc(payload) {
   window.ipc.postMessage(JSON.stringify(payload));
 }
 
+// 設定を楽観的に反映してから保存を依頼する。
 function save(patch) {
   if (!state) return;
   state.settings = Object.assign({}, state.settings, patch);
@@ -63,6 +65,7 @@ function icon(name) {
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${icons[name] || ""}</svg>`;
 }
 
+// 録音・推論・貼り付けの状態とエンジン状態を表示する。
 function setStatus() {
   if (!state) return;
   const visual = state.visual || "idle";
@@ -119,6 +122,7 @@ function friendlyModelError(error) {
   return text;
 }
 
+// モデル一覧を進捗・選択状態つきで描画する。
 function renderModels() {
   const grid = $("#modelGrid");
   if (!state) return;
@@ -186,6 +190,7 @@ function renderModels() {
   }
 }
 
+// 入力デバイスの選択肢とマイクエラーを更新する。
 function renderDevices() {
   if (!state) return;
   const select = $("#deviceSelect");
@@ -224,6 +229,7 @@ function renderDevices() {
   }
 }
 
+// 単語辞書の一覧を描画する。
 function renderWords() {
   if (!state) return;
   const words = state.words || [];
@@ -243,6 +249,7 @@ function renderWords() {
     </div>`).join("");
 }
 
+// トグル・音量・辞書パスなどのコントロールを同期する。
 function renderControls() {
   if (!state) return;
   const settings = state.settings;
@@ -266,6 +273,7 @@ function renderControls() {
   $("#version").textContent = `v${state.version || "0.1.0"}`;
 }
 
+// 受信した状態を各セクションへ反映する。
 function render() {
   if (!state) return;
   setStatus();
@@ -294,6 +302,7 @@ function levelPercent(value) {
   return Math.min(1, Math.sqrt(Math.max(0, value) * 9));
 }
 
+// 入力レベルをメーターと波形へ反映する。
 function applyLevel(value) {
   level = value || 0;
   const percent = levelPercent(level);
@@ -308,6 +317,7 @@ function applyLevel(value) {
   });
 }
 
+// プレビューの波形を状態に合わせて毎フレーム動かす。
 function animatePreview() {
   const bars = $$("#previewPill span");
   const visual = state ? state.visual : "idle";
@@ -353,6 +363,7 @@ $("#hotkeyBox").addEventListener("click", () => {
   $("#hotkeyHint").textContent = "キーを押してください…（Esc で取消）";
 });
 
+// KeyboardEvent.code を Rust 側のキー名へ変換する。
 function mapKey(event) {
   const code = event.code || "";
   const map = {

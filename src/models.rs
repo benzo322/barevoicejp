@@ -15,19 +15,19 @@ use crate::config::{self, Config};
 const RELEASE: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
 
 /// 設定画面に表示するモデル。
-pub struct ModelSpec {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub subtitle: &'static str,
-    pub archive: &'static str,
-    pub size_label: &'static str,
-    pub speed: u8,
-    pub accuracy: u8,
-    pub recommended: bool,
+pub(crate) struct ModelSpec {
+    pub(crate) id: &'static str,
+    pub(crate) name: &'static str,
+    pub(crate) subtitle: &'static str,
+    pub(crate) archive: &'static str,
+    pub(crate) size_label: &'static str,
+    pub(crate) speed: u8,
+    pub(crate) accuracy: u8,
+    pub(crate) recommended: bool,
 }
 
 /// 表示順に並べたモデル定義。
-pub const SPECS: [ModelSpec; 5] = [
+pub(crate) const SPECS: [ModelSpec; 5] = [
     ModelSpec {
         id: "sensevoice",
         name: "SenseVoice",
@@ -80,13 +80,14 @@ pub const SPECS: [ModelSpec; 5] = [
     },
 ];
 
-pub fn spec(id: &str) -> Option<&'static ModelSpec> {
+/// ID に対応するモデル定義を返す。
+fn spec(id: &str) -> Option<&'static ModelSpec> {
     SPECS.iter().find(|spec| spec.id == id)
 }
 
 /// ダウンロード工程。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Phase {
+pub(crate) enum Phase {
     Idle,
     Downloading,
     Extracting,
@@ -94,12 +95,13 @@ pub enum Phase {
     Failed,
 }
 
+/// 1 モデル分のダウンロード進捗。
 #[derive(Clone, Debug)]
-pub struct DownloadState {
-    pub phase: Phase,
-    pub downloaded: u64,
-    pub total: u64,
-    pub error: Option<String>,
+pub(crate) struct DownloadState {
+    pub(crate) phase: Phase,
+    pub(crate) downloaded: u64,
+    pub(crate) total: u64,
+    pub(crate) error: Option<String>,
 }
 
 impl Default for DownloadState {
@@ -132,7 +134,8 @@ fn update(id: &str, state: DownloadState) {
         .insert(id.to_string(), state);
 }
 
-pub fn download_state(id: &str) -> DownloadState {
+/// 設定画面が読むダウンロード進捗のコピー。
+pub(crate) fn download_state(id: &str) -> DownloadState {
     progress(id)
 }
 
@@ -150,7 +153,7 @@ fn fail(id: &str, message: impl Into<String>) {
 }
 
 /// モデルの実体が揃っているか。
-pub fn is_installed(config: &Config, id: &str) -> bool {
+pub(crate) fn is_installed(config: &Config, id: &str) -> bool {
     let dir = config.default_model_dir_for(id);
     let files = || {
         fs::read_dir(&dir)
@@ -190,7 +193,7 @@ pub fn is_installed(config: &Config, id: &str) -> bool {
 }
 
 /// ディレクトリ配下の合計バイト数。UI の「使用容量」表示に使う。
-pub fn installed_bytes(dir: &Path) -> u64 {
+pub(crate) fn installed_bytes(dir: &Path) -> u64 {
     let Ok(entries) = fs::read_dir(dir) else {
         return 0;
     };
@@ -214,7 +217,7 @@ fn archive_path(id: &str) -> Option<PathBuf> {
 }
 
 /// モデルをダウンロードして展開する。完了・失敗時は `done` を呼ぶ。
-pub fn download<F>(id: &str, done: F)
+pub(crate) fn download<F>(id: &str, done: F)
 where
     F: FnOnce() + Send + 'static,
 {
@@ -257,6 +260,7 @@ where
     }
 }
 
+/// ダウンロードと展開を実行し、進捗を更新する。
 fn run_download(id: &str, spec: &ModelSpec, dest: &Path) {
     let url = format!("{RELEASE}/{}", spec.archive);
     let cache_dir = config::models_root().join(".cache");
@@ -302,6 +306,7 @@ fn run_download(id: &str, spec: &ModelSpec, dest: &Path) {
     crate::info!("モデルを展開しました: {}", dest.display());
 }
 
+/// tar.bz2 を `.part` ファイルへ受信し、完了後に確定する。
 fn fetch(id: &str, url: &str, archive: &Path) -> Result<(), String> {
     let response = ureq::get(url)
         .call()
@@ -363,6 +368,7 @@ fn fetch(id: &str, url: &str, archive: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 一時ディレクトリへ展開し、単一ディレクトリなら `models/` 直下へ移す。
 fn extract(id: &str, spec: &ModelSpec, archive: &Path, dest: &Path) -> Result<(), String> {
     let temp = config::models_root().join(format!(".extract-{id}"));
     if temp.exists() {
@@ -398,12 +404,13 @@ fn extract(id: &str, spec: &ModelSpec, archive: &Path, dest: &Path) -> Result<()
     Ok(())
 }
 
+/// アーカイブのサイズ。取得できなければ 0。
 fn archive_metadata(path: &Path) -> u64 {
     fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
 /// モデルを削除して解放したバイト数を返す。
-pub fn delete(config: &Config, id: &str) -> Result<u64, String> {
+pub(crate) fn delete(config: &Config, id: &str) -> Result<u64, String> {
     if config.model == id {
         return Err("使用中のモデルは削除できません".to_string());
     }
@@ -428,7 +435,8 @@ pub fn delete(config: &Config, id: &str) -> Result<u64, String> {
     Ok(bytes)
 }
 
-pub fn format_bytes(bytes: u64) -> String {
+/// バイト数を B/KB/MB/GB の読みやすい表記にする。
+pub(crate) fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let mut value = bytes as f64;
     let mut unit = 0;

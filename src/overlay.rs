@@ -65,12 +65,13 @@ const BAR_SIDE_PAD: f32 = 12.0;
 const BAR_MAX_HEIGHT: f32 = 20.5;
 
 /// マイクレベル・表示状態・有効フラグを共有してバーを作る。
-pub struct Overlay {
+pub(crate) struct Overlay {
     hwnd: HWND,
 }
 
 impl Overlay {
-    pub fn new(
+    /// レイヤードウィンドウを作成し、16ms タイマーで描画を開始する。
+    pub(crate) fn new(
         level: Arc<AtomicU32>,
         visual: Arc<AtomicU8>,
         enabled: Arc<AtomicBool>,
@@ -141,6 +142,7 @@ impl Drop for Overlay {
     }
 }
 
+/// オーバーレイの描画・ホバー・アニメーション状態。
 struct Ctx {
     hwnd: HWND,
     level: Arc<AtomicU32>,
@@ -256,6 +258,7 @@ impl Ctx {
         dx * dx + dy * dy <= radius * radius
     }
 
+    /// マウス位置がバー本体 (または閉じるボタン) の上か。
     fn is_hit(&self, x: f32, y: f32) -> bool {
         let hit = self.hit_rect();
         let inside_rect =
@@ -299,6 +302,7 @@ impl Ctx {
         }
     }
 
+    /// 16ms ごとに状態を補間し、必要なら描き直す。
     fn tick(&mut self) {
         let state = VisualState::from_u8(self.visual.load(Ordering::Relaxed));
         if state != self.last_state {
@@ -409,6 +413,7 @@ impl Ctx {
         }
     }
 
+    /// 現在のサイズ・状態でピルと波形を描き、レイヤードウィンドウへ転送する。
     fn render(&mut self, state: VisualState) {
         let (width, height) = pixel_size(self.scale);
         let (width_u32, height_u32) = (width as u32, height as u32);
@@ -821,6 +826,7 @@ impl Surface {
         }
     }
 
+    /// RGBA を BGRA へ並べ替えて `UpdateLayeredWindow` へ渡す。
     fn update(&self, hwnd: HWND, pixmap: &Pixmap, blend: &BLENDFUNCTION) {
         let source = pixmap.data();
         let pixels = self.width as usize * self.height as usize;

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 /// アプリの明示的な状態。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AppState {
+pub(crate) enum AppState {
     /// 待機中。ホットキー押下を受け付ける。
     Idle,
     /// 録音中。プリロールを含む範囲を切り出す。
@@ -22,7 +22,7 @@ pub enum AppState {
 /// フローティングバーが参照する表示状態。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
-pub enum VisualState {
+pub(crate) enum VisualState {
     Idle = 0,
     Recording = 1,
     Processing = 2,
@@ -30,7 +30,7 @@ pub enum VisualState {
 }
 
 impl VisualState {
-    pub fn from_u8(value: u8) -> Self {
+    pub(crate) fn from_u8(value: u8) -> Self {
         match value {
             1 => Self::Recording,
             2 => Self::Processing,
@@ -42,7 +42,7 @@ impl VisualState {
 
 /// ホットキー離下時の結果。
 #[derive(Debug)]
-pub enum ReleaseOutcome {
+pub(crate) enum ReleaseOutcome {
     /// 録音中ではなかった。
     Ignored,
     /// Esc でキャンセルされた。
@@ -61,7 +61,7 @@ pub enum ReleaseOutcome {
 ///
 /// キーリピートによる二重発火を防ぎ、推論中でも次の発話を録音できる。
 #[derive(Debug)]
-pub struct StateMachine {
+pub(crate) struct StateMachine {
     state: AppState,
     cancelled: bool,
     pressed_at: Option<Instant>,
@@ -77,7 +77,7 @@ impl Default for StateMachine {
 
 impl StateMachine {
     /// `Idle` 状態で初期化する。
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: AppState::Idle,
             cancelled: false,
@@ -88,12 +88,12 @@ impl StateMachine {
     }
 
     /// 現在の状態。
-    pub fn state(&self) -> AppState {
+    pub(crate) fn state(&self) -> AppState {
         self.state
     }
 
     /// 録音開始。キーリピート・直後の再押下は `false`。
-    pub fn begin_recording(
+    pub(crate) fn begin_recording(
         &mut self,
         now: Instant,
         repeat_guard: Duration,
@@ -118,7 +118,7 @@ impl StateMachine {
     }
 
     /// 録音中の Esc。既にキャンセル済みなら `false`。
-    pub fn cancel(&mut self) -> bool {
+    pub(crate) fn cancel(&mut self) -> bool {
         if self.state != AppState::Recording || self.cancelled {
             return false;
         }
@@ -127,14 +127,14 @@ impl StateMachine {
     }
 
     /// Esc キャンセル待ちかどうか。
-    pub fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.cancelled
     }
 
     /// ホットキー離下を処理する。
     ///
     /// 録音中なら `tail_samples` を加えた範囲を返し、状態を `Processing` へ進める。
-    pub fn release(
+    pub(crate) fn release(
         &mut self,
         now: Instant,
         tail_samples: u64,
@@ -166,28 +166,28 @@ impl StateMachine {
 
     /// Processing からのみ Pasting へ遷移する。
     /// 推論完了後、貼り付け開始時に呼ぶ。
-    pub fn begin_pasting(&mut self) {
+    pub(crate) fn begin_pasting(&mut self) {
         if self.state == AppState::Processing {
             self.state = AppState::Pasting;
         }
     }
 
     /// Pasting からのみ Idle へ戻す。録音が始まっていたら触らない。
-    pub fn finish_pasting(&mut self) {
+    pub(crate) fn finish_pasting(&mut self) {
         if self.state == AppState::Pasting {
             self.state = AppState::Idle;
         }
     }
 
     /// 推論・貼り付け失敗時に Processing/Pasting を Idle へ戻す。
-    pub fn abort(&mut self) {
+    pub(crate) fn abort(&mut self) {
         if matches!(self.state, AppState::Processing | AppState::Pasting) {
             self.state = AppState::Idle;
         }
     }
 
     /// キーが既に離されている録音を、その場で破棄する。
-    pub fn discard_recording(&mut self) -> bool {
+    pub(crate) fn discard_recording(&mut self) -> bool {
         if self.state == AppState::Recording {
             self.state = AppState::Idle;
             self.cancelled = false;
@@ -200,11 +200,11 @@ impl StateMachine {
 }
 
 /// 2回押しと判定する時間窓。
-pub const DOUBLE_PRESS_WINDOW: Duration = Duration::from_millis(300);
+const DOUBLE_PRESS_WINDOW: Duration = Duration::from_millis(300);
 
 /// ホットキー押下時のハイブリッド判定。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PressOutcome {
+pub(crate) enum PressOutcome {
     /// 新規録音を開始する。
     Start,
     /// 2回目の押下。録音を継続し、トグル状態へ入る。
@@ -217,7 +217,7 @@ pub enum PressOutcome {
 
 /// ホットキー離下時のハイブリッド判定。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HybridRelease {
+pub(crate) enum HybridRelease {
     /// 何もしない。
     Ignore,
     /// 長押しの終了。即座に録音を確定する。
@@ -232,7 +232,7 @@ pub enum HybridRelease {
 /// 待つ。2回目が窓内に来ればトグル録音へ移行し、来なければ短い
 /// Push-to-Talk として確定する。
 #[derive(Clone, Copy, Debug, Default)]
-pub struct HybridState {
+pub(crate) struct HybridState {
     key_down: bool,
     toggle_active: bool,
     press_started: Option<Instant>,
@@ -240,7 +240,7 @@ pub struct HybridState {
 }
 
 impl HybridState {
-    pub fn on_press(
+    pub(crate) fn on_press(
         &mut self,
         now: Instant,
         recording: bool,
@@ -273,7 +273,7 @@ impl HybridState {
         PressOutcome::Start
     }
 
-    pub fn on_release(&mut self, now: Instant, recording: bool) -> HybridRelease {
+    pub(crate) fn on_release(&mut self, now: Instant, recording: bool) -> HybridRelease {
         if !self.key_down {
             return HybridRelease::Ignore;
         }
@@ -296,19 +296,19 @@ impl HybridState {
         }
     }
 
-    pub fn toggle_active(&self) -> bool {
+    pub(crate) fn toggle_active(&self) -> bool {
         self.toggle_active
     }
 
     /// Esc でトグル録音を終了する。
-    pub fn end_toggle(&mut self) {
+    pub(crate) fn end_toggle(&mut self) {
         self.toggle_active = false;
         self.press_started = None;
         self.suppress_release = false;
     }
 
     /// 2回押し待ちを破棄して初期状態へ戻す。
-    pub fn cancel_pending(&mut self) {
+    pub(crate) fn cancel_pending(&mut self) {
         *self = Self::default();
     }
 }
