@@ -15,7 +15,9 @@ use tao::event_loop::{ControlFlow, EventLoop, EventLoopBuilder, EventLoopProxy};
 use tao::platform::windows::WindowExtWindows;
 use tao::window::{Window, WindowBuilder};
 use windows_sys::Win32::Foundation::RECT;
-use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETWORKAREA, SystemParametersInfoW};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SPI_GETWORKAREA, SystemParametersInfoW,
+};
 use wry::{WebView, WebViewBuilder};
 
 use crate::app::App;
@@ -158,7 +160,7 @@ pub(crate) fn run(mut app: App) -> ! {
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(UiEvent::ShowSettings) => {
-                show_window(&window, &webview);
+                show_window(&window, &webview, "control");
                 push_state(&webview, &app, &settings, &notice);
                 push_level(&webview, &app);
             }
@@ -172,6 +174,10 @@ pub(crate) fn run(mut app: App) -> ! {
                 if let Some((onboarding_window, _)) = &onboarding {
                     onboarding_window.set_visible(false);
                 }
+                // 初回はモデルが未ダウンロードなので、そのまま「モデル」タブへ誘導する。
+                show_window(&window, &webview, "models");
+                push_state(&webview, &app, &settings, &notice);
+                push_level(&webview, &app);
             }
             Event::UserEvent(UiEvent::Quit) => {
                 tray::shutdown();
@@ -247,17 +253,18 @@ pub(crate) fn run(mut app: App) -> ! {
 
 /// 設定画面をフローティングバーの直上へ出し、最前面へ持ってくる。
 ///
-/// 手動で開いたときは常に「操作」タブから始める。
-fn show_window(window: &Window, webview: &WebView) {
+/// `tab` で開くタブを指定する。手動で開いたときは「操作」、オンボーディング完了後は「モデル」。
+fn show_window(window: &Window, webview: &WebView, tab: &str) {
     window.set_minimized(false);
     place_window(window);
     window.set_visible(true);
     window.set_focus();
     win::force_foreground(window.hwnd() as *mut core::ffi::c_void);
-    if let Err(exc) = webview.evaluate_script(
-        "window.__barevoice && window.__barevoice.openTab && window.__barevoice.openTab('control');",
-    ) {
-        crate::debug!("操作タブへ切り替えられません: {exc}");
+    let script = format!(
+        "window.__barevoice && window.__barevoice.openTab && window.__barevoice.openTab('{tab}');"
+    );
+    if let Err(exc) = webview.evaluate_script(&script) {
+        crate::debug!("{tab} タブへ切り替えられません: {exc}");
     }
 }
 
@@ -283,16 +290,18 @@ fn place_window(window: &Window) {
     window.set_outer_position(PhysicalPosition::new(x, y));
 }
 
-/// プライマリディスプレイのワークエリア中央へオンボーディングを配置する。
+/// プライマリディスプレイの中央へオンボーディングを配置する。
 ///
 /// 初回起動時はフローティングバーの位置に関係なく、画面の X / Y とも完全な中央に出す。
 fn place_window_centered(window: &Window) {
-    let Some(work) = work_area() else {
+    // SAFETY: GetSystemMetrics は引数なしで副作用もない。プライマリの画面サイズを返す。
+    let (width, height) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+    if width <= 0 || height <= 0 {
         return;
-    };
+    }
     let size = window.outer_size();
-    let x = work.left + ((work.right - work.left) - size.width as i32) / 2;
-    let y = work.top + ((work.bottom - work.top) - size.height as i32) / 2;
+    let x = (width - size.width as i32) / 2;
+    let y = (height - size.height as i32) / 2;
     window.set_outer_position(PhysicalPosition::new(x, y));
 }
 

@@ -159,8 +159,8 @@ function renderModels() {
             <div class="model-icon">${icon("model")}</div>
             <div style="flex:1">
               <div class="model-name">${esc(model.name)}
-                ${model.recommended ? '<span class="badge">おすすめ</span>' : ""}
-                ${model.installed ? '<span class="badge green">DL済み</span>' : ""}
+                ${model.recommended ? '<span class="badge recommend">★ 推奨（0.2秒・最速）</span>' : ""}
+                ${model.installed ? '<span class="badge green">DL済み</span>' : (busy ? "" : '<span class="badge warn">未ダウンロード</span>')}
               </div>
               <div class="model-sub">${esc(model.subtitle)}</div>
             </div>
@@ -481,7 +481,8 @@ $("#modelGrid").addEventListener("click", event => {
   const model = (state.models || []).find(item => item.id === card.dataset.model);
   if (!model) return;
   if (!model.installed) {
-    toast("このモデルは未ダウンロードです。右下の「ダウンロード」ボタンを押してください", "info");
+    // 未ダウンロードのカードは、そのままクリックで取得を開始する。
+    ipc({ cmd: "download_model", id: model.id });
     return;
   }
   if (card.dataset.model !== state.settings.model) {
