@@ -356,12 +356,7 @@ fn save_settings(
     let previous = settings.clone();
     let mut config = app.shared().snapshot();
     next.apply_to(&mut config);
-    let applied = Settings::from_config(&config);
-
-    if let Err(exc) = applied.save(Path::new(config::CONFIG_PATH)) {
-        set_notice(notice, notice_id, "error", &exc);
-        return;
-    }
+    let mut applied = Settings::from_config(&config);
 
     app.apply_config(config.clone());
     if applied.hotkey != previous.hotkey {
@@ -375,17 +370,29 @@ fn save_settings(
     {
         set_notice(notice, notice_id, "error", &exc);
     }
+
     if applied.device != previous.device
         && let Err(exc) = app.restart_capture(&config)
     {
+        // 開けなかったデバイスを保存したままにせず、元のマイクへ戻す。
+        config.device = previous.device.clone();
+        app.apply_config(config.clone());
+        let _ = app.restart_capture(&config);
+        applied = Settings::from_config(&config);
+        let _ = applied.save(Path::new(config::CONFIG_PATH));
+        *settings = applied;
         set_notice(
             notice,
             notice_id,
             "error",
-            &format!("マイクを開けません: {exc}"),
+            &format!("マイクを切り替えられませんでした。元のマイクに戻しました: {exc}"),
         );
+        return;
     }
 
+    if let Err(exc) = applied.save(Path::new(config::CONFIG_PATH)) {
+        set_notice(notice, notice_id, "error", &exc);
+    }
     *settings = applied;
 }
 

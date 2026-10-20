@@ -1,8 +1,8 @@
-//! 文字なしフローティングピルバー。
+//! 画面下部のフローティングバー。
 //!
-//! Win32 のレイヤードウィンドウに tiny-skia で描画する。WebView2 を
-//! 使わないため、フォーカスを奪わず 180×40 の小さなバーを 60fps で
-//! 更新できる。波形はマイクの RMS に追従し、推論中は中央へ収束する。
+//! 待機時は細い半透明ライン、録音・推論時は小さなピルへ滑らかに展開する。
+//! Win32 のレイヤードウィンドウに tiny-skia で描画するため、フォーカスを
+//! 奪わず、クリックも透過する。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
@@ -35,14 +35,17 @@ use crate::win::wide;
 const CLASS_NAME: &str = "MkVoiceJpOverlay";
 const TIMER_ID: usize = 1;
 /// 影を含めたウィンドウの論理サイズ。
-const WINDOW_WIDTH: f32 = 220.0;
-const WINDOW_HEIGHT: f32 = 80.0;
-/// ピルの論理サイズ (仕様: 約 180×40)。
-const PILL_WIDTH: f32 = 180.0;
-const PILL_HEIGHT: f32 = 40.0;
+const WINDOW_WIDTH: f32 = 170.0;
+const WINDOW_HEIGHT: f32 = 56.0;
+/// 待機時の細いライン。
+const IDLE_WIDTH: f32 = 70.0;
+const IDLE_HEIGHT: f32 = 3.0;
+/// 録音・推論時の極小ピル。
+const ACTIVE_WIDTH: f32 = 130.0;
+const ACTIVE_HEIGHT: f32 = 28.0;
 const BAR_COUNT: usize = 5;
 
-/// マイクレベル・表示状態・有効フラグを共有してピルバーを作る。
+/// マイクレベル・表示状態・有効フラグを共有してバーを作る。
 pub struct Overlay {
     hwnd: HWND,
 }
@@ -126,12 +129,10 @@ struct Ctx {
     scale: f32,
     surface: Option<Surface>,
     pixmap: Option<Pixmap>,
-    pill: Option<Path>,
-    shadows: Vec<Path>,
     unit_circle: Option<Path>,
-    bar_shader: Shader<'static>,
-    glow_shader: Shader<'static>,
-    background_shader: Shader<'static>,
+    /// 現在の論理サイズ。待機ラインと録音ピルの間を補間する。
+    width: f32,
+    height: f32,
     heights: [f32; BAR_COUNT],
     visible: bool,
     alpha: f32,
@@ -146,24 +147,18 @@ impl Ctx {
         visual: Arc<AtomicU8>,
         enabled: Arc<AtomicBool>,
     ) -> Self {
-        let scale = 1.0;
-        let pill_rect = pill_rect(scale);
-        let unit_circle = PathBuilder::from_circle(0.0, 0.0, 1.0);
         let mut ctx = Self {
             hwnd,
             level,
             visual,
             enabled,
-            scale,
+            scale: 1.0,
             surface: None,
             pixmap: None,
-            pill: rounded_rect(pill_rect, PILL_HEIGHT * scale * 0.5),
-            shadows: shadow_paths(scale),
-            unit_circle,
-            bar_shader: bar_gradient(),
-            glow_shader: glow_gradient(),
-            background_shader: background_gradient(),
-            heights: [7.0; BAR_COUNT],
+            unit_circle: PathBuilder::from_circle(0.0, 0.0, 1.0),
+            width: IDLE_WIDTH,
+            height: IDLE_HEIGHT,
+            heights: [1.5; BAR_COUNT],
             visible: false,
             alpha: 0.0,
             last_state: VisualState::Idle,
@@ -178,8 +173,6 @@ impl Ctx {
             return;
         }
         self.scale = scale;
-        self.pill = rounded_rect(pill_rect(scale), PILL_HEIGHT * scale * 0.5);
-        self.shadows = shadow_paths(scale);
         self.surface = None;
         self.pixmap = None;
     }
@@ -197,7 +190,7 @@ impl Ctx {
         let (x, y) = if ok != 0 {
             (
                 work.left + ((work.right - work.left) - width) / 2,
-                work.bottom - height - (10.0 * scale) as i32,
+                work.bottom - height - (6.0 * scale) as i32,
             )
         } else {
             (0, 0)
@@ -216,19 +209,18 @@ impl Ctx {
         }
         let enabled = self.enabled.load(Ordering::Relaxed);
 
-        if !enabled || state == VisualState::Idle {
+        if !enabled {
             if self.visible {
-                self.alpha -= 0.075;
+                self.alpha -= 0.09;
                 if self.alpha <= 0.0 {
                     self.alpha = 0.0;
                     self.visible = false;
-                    crate::debug!("オーバーレイを非表示にしました");
                     // SAFETY: 作成済みウィンドウを隠す。
                     unsafe {
                         windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(self.hwnd, SW_HIDE);
                     }
                 } else {
-                    self.render(state);
+                    self.render(VisualState::Idle);
                 }
             }
             return;
@@ -238,7 +230,6 @@ impl Ctx {
             self.reposition();
             self.visible = true;
             self.alpha = 0.0;
-            crate::debug!("オーバーレイを表示します (state={state:?})");
             // SAFETY: フォーカスを奪わず最前面に表示する。
             unsafe {
                 let (width, height) = pixel_size(self.scale);
@@ -253,7 +244,29 @@ impl Ctx {
                 );
             }
         }
+
         self.alpha = (self.alpha + 0.16).min(1.0);
+        let active = state != VisualState::Idle;
+        let target_width = if active { ACTIVE_WIDTH } else { IDLE_WIDTH };
+        let target_height = if active { ACTIVE_HEIGHT } else { IDLE_HEIGHT };
+        let width_speed = if target_width > self.width {
+            0.34
+        } else {
+            0.20
+        };
+        let height_speed = if target_height > self.height {
+            0.52
+        } else {
+            0.26
+        };
+        self.width += (target_width - self.width) * width_speed;
+        self.height += (target_height - self.height) * height_speed;
+        if (target_width - self.width).abs() < 0.05 {
+            self.width = target_width;
+        }
+        if (target_height - self.height).abs() < 0.05 {
+            self.height = target_height;
+        }
         self.render(state);
     }
 
@@ -275,7 +288,7 @@ impl Ctx {
         if ok == 0 {
             0
         } else {
-            work.bottom - height - (10.0 * self.scale) as i32
+            work.bottom - height - (6.0 * self.scale) as i32
         }
     }
 
@@ -297,63 +310,89 @@ impl Ctx {
         pixmap.fill(Color::TRANSPARENT);
 
         let scale = self.scale;
-        let rect = pill_rect(scale);
+        let rect = content_rect(self.width, self.height, scale);
+        let gate = ((self.height - IDLE_HEIGHT) / (ACTIVE_HEIGHT - IDLE_HEIGHT)).clamp(0.0, 1.0);
 
-        // 柔らかいアンビエントシャドウ (多層の丸角でブラーを近似)。
-        for (index, path) in self.shadows.iter().enumerate() {
-            let alpha = 6 + index as u8 * 2;
+        // 柔らかいアンビエントシャドウ。待機ラインではかなり薄くする。
+        for (index, path) in shadow_paths(rect, scale).iter().enumerate() {
+            let alpha = ((2.0 + index as f32 * 1.5) * (0.28 + 0.72 * gate)) as u8;
             let mut paint = Paint::default();
             paint.set_color(Color::from_rgba8(30, 41, 59, alpha));
             pixmap.fill_path(path, &paint, FillRule::Winding, Transform::identity(), None);
         }
 
-        // すりガラス調の半透明ホワイト。
-        if let Some(pill) = &self.pill {
+        if let Some(pill) = rounded_rect(rect, rect.height() * 0.5) {
             let fill = Paint {
-                shader: self.background_shader.clone(),
+                shader: background_shader(rect),
                 anti_alias: true,
                 ..Paint::default()
             };
-            pixmap.fill_path(pill, &fill, FillRule::Winding, Transform::identity(), None);
+            pixmap.fill_path(&pill, &fill, FillRule::Winding, Transform::identity(), None);
 
-            // ガラスの縁。外側は淡いブルー、内側は白いハイライト。
+            // 待機時は淡いブルーのラインとして視認できるよう色を足す。
+            if gate < 0.98 {
+                let mut tint = Paint::default();
+                tint.set_color(Color::from_rgba8(
+                    201,
+                    221,
+                    244,
+                    ((1.0 - gate) * 120.0) as u8,
+                ));
+                pixmap.fill_path(&pill, &tint, FillRule::Winding, Transform::identity(), None);
+            }
+
             let mut edge = Paint::default();
-            edge.set_color(Color::from_rgba8(186, 210, 236, 96));
+            edge.set_color(Color::from_rgba8(
+                186,
+                210,
+                236,
+                (100.0 + 80.0 * gate) as u8,
+            ));
             pixmap.stroke_path(
-                pill,
+                &pill,
                 &edge,
                 &Stroke {
-                    width: 1.2 * scale,
+                    width: 1.0 * scale,
                     ..Stroke::default()
                 },
                 Transform::identity(),
                 None,
             );
-            let mut highlight = Paint::default();
-            highlight.set_color(Color::from_rgba8(255, 255, 255, 210));
-            pixmap.stroke_path(
-                pill,
-                &highlight,
-                &Stroke {
-                    width: 0.8 * scale,
-                    ..Stroke::default()
-                },
-                Transform::from_translate(0.0, 0.65 * scale),
-                None,
-            );
+
+            if rect.height() > 7.0 * scale {
+                let mut highlight = Paint::default();
+                highlight.set_color(Color::from_rgba8(
+                    255,
+                    255,
+                    255,
+                    (120.0 + 80.0 * gate) as u8,
+                ));
+                pixmap.stroke_path(
+                    &pill,
+                    &highlight,
+                    &Stroke {
+                        width: 0.7 * scale,
+                        ..Stroke::default()
+                    },
+                    Transform::from_translate(0.0, 0.55 * scale),
+                    None,
+                );
+            }
         }
 
-        // 上辺のきらめき。
-        let mut glint = Paint::default();
-        glint.set_color(Color::from_rgba8(255, 255, 255, 135));
-        let glint_rect = Rect::from_xywh(
-            rect.left() + 26.0 * scale,
-            rect.top() + 1.6 * scale,
-            rect.width() - 52.0 * scale,
-            0.9 * scale,
-        );
-        if let Some(glint_rect) = glint_rect {
-            pixmap.fill_rect(glint_rect, &glint, Transform::identity(), None);
+        // 上辺のきらめきは録音時だけ。
+        if gate > 0.18 {
+            let mut glint = Paint::default();
+            glint.set_color(Color::from_rgba8(255, 255, 255, (110.0 * gate) as u8));
+            let glint_rect = Rect::from_xywh(
+                rect.left() + rect.width() * 0.18,
+                rect.top() + 1.2 * scale,
+                rect.width() * 0.64,
+                0.8 * scale,
+            );
+            if let Some(glint_rect) = glint_rect {
+                pixmap.fill_rect(glint_rect, &glint, Transform::identity(), None);
+            }
         }
 
         Self::render_bars(
@@ -361,10 +400,9 @@ impl Ctx {
             state,
             rect,
             scale,
+            gate,
             &mut self.heights,
             &self.unit_circle,
-            &self.bar_shader,
-            &self.glow_shader,
             self.state_since,
             &self.level,
         );
@@ -384,82 +422,104 @@ impl Ctx {
         state: VisualState,
         rect: Rect,
         scale: f32,
+        gate: f32,
         heights: &mut [f32; BAR_COUNT],
         unit_circle: &Option<Path>,
-        bar_shader: &Shader<'static>,
-        glow_shader: &Shader<'static>,
         state_since: Instant,
         level: &AtomicU32,
     ) {
+        if gate <= 0.02 {
+            return;
+        }
+
         let center_y = rect.top() + rect.height() * 0.5;
+        let center_x = rect.left() + rect.width() * 0.5;
         let bar_width = 4.0 * scale;
         let gap = 5.2 * scale;
         let group_width = BAR_COUNT as f32 * bar_width + (BAR_COUNT as f32 - 1.0) * gap;
         let start_x = rect.left() + (rect.width() - group_width) * 0.5;
         let weights = [0.58, 0.84, 1.0, 0.78, 0.62];
 
-        if state == VisualState::Recording {
-            let rms = f32::from_bits(level.load(Ordering::Relaxed));
-            let normalized = (rms.max(0.0) * 7.0).sqrt().clamp(0.0, 1.0);
-            let elapsed = state_since.elapsed().as_secs_f32();
-            for (index, weight) in weights.iter().enumerate() {
-                let wobble = ((elapsed * 5.2 + index as f32 * 0.9).sin() * 0.5 + 0.5) * 2.2;
-                let target = (5.0 + normalized * 17.5 + wobble) * scale * weight;
-                let current = &mut heights[index];
-                let coefficient = if target > *current { 0.42 } else { 0.12 };
-                *current += (target - *current) * coefficient;
+        match state {
+            VisualState::Recording => {
+                // RMS を強めに持ち上げ、声の立ち上がりへ俊敏に追従させる。
+                let rms = f32::from_bits(level.load(Ordering::Relaxed));
+                let normalized = (rms.max(0.0) * 12.0).sqrt().clamp(0.0, 1.0);
+                let elapsed = state_since.elapsed().as_secs_f32();
+                for (index, weight) in weights.iter().enumerate() {
+                    let wobble = ((elapsed * 6.0 + index as f32 * 0.9).sin() * 0.5 + 0.5) * 1.4;
+                    let target = (1.5 + normalized * 13.0 + wobble) * weight;
+                    let current = &mut heights[index];
+                    let coefficient = if target > *current { 0.75 } else { 0.35 };
+                    *current += (target - *current) * coefficient;
+                }
             }
-        } else {
-            let elapsed = state_since.elapsed().as_secs_f32();
-            let converge = (elapsed * 5.5).clamp(0.0, 1.0);
-            let pulse = (elapsed * 9.0).sin() * 0.5 + 0.5;
-            for height in heights.iter_mut() {
-                let target = (4.0 + pulse * 4.0) * scale;
-                *height += (target - *height) * 0.24;
+            VisualState::Processing | VisualState::Pasting => {
+                let elapsed = state_since.elapsed().as_secs_f32();
+                let pulse = (elapsed * 9.0).sin() * 0.5 + 0.5;
+                for height in heights.iter_mut() {
+                    let target = 1.5 + pulse * 3.0;
+                    *height += (target - *height) * 0.28;
+                }
             }
-            let center_x = rect.left() + rect.width() * 0.5;
-            if converge > 0.0
-                && let Some(circle) = unit_circle
-            {
-                let mut glow = Paint::default();
-                glow.set_color(Color::from_rgba8(99, 102, 241, 22));
-                let radius = (9.0 + pulse * 4.0) * scale;
-                pixmap.fill_path(
-                    circle,
-                    &glow,
-                    FillRule::Winding,
-                    Transform::from_scale(radius, radius).post_translate(center_x, center_y),
-                    None,
-                );
-                glow.set_color(Color::from_rgba8(129, 140, 248, 42));
-                let radius = (5.0 + pulse * 2.0) * scale;
-                pixmap.fill_path(
-                    circle,
-                    &glow,
-                    FillRule::Winding,
-                    Transform::from_scale(radius, radius).post_translate(center_x, center_y),
-                    None,
-                );
+            VisualState::Idle => {
+                for height in heights.iter_mut() {
+                    *height += (0.0 - *height) * 0.35;
+                }
             }
         }
 
+        let converge = match state {
+            VisualState::Processing | VisualState::Pasting => {
+                (state_since.elapsed().as_secs_f32() * 5.5).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        };
+
+        if converge > 0.0
+            && gate > 0.1
+            && let Some(circle) = unit_circle
+        {
+            let elapsed = state_since.elapsed().as_secs_f32();
+            let pulse = (elapsed * 9.0).sin() * 0.5 + 0.5;
+            let mut glow = Paint::default();
+            glow.set_color(Color::from_rgba8(99, 102, 241, (22.0 * gate) as u8));
+            let radius = (9.0 + pulse * 4.0) * scale * gate.max(0.35);
+            pixmap.fill_path(
+                circle,
+                &glow,
+                FillRule::Winding,
+                Transform::from_scale(radius, radius).post_translate(center_x, center_y),
+                None,
+            );
+            glow.set_color(Color::from_rgba8(129, 140, 248, (42.0 * gate) as u8));
+            let radius = (5.0 + pulse * 2.0) * scale * gate.max(0.35);
+            pixmap.fill_path(
+                circle,
+                &glow,
+                FillRule::Winding,
+                Transform::from_scale(radius, radius).post_translate(center_x, center_y),
+                None,
+            );
+        }
+
         let paint = Paint {
-            shader: bar_shader.clone(),
+            shader: bar_shader(start_x, start_x + group_width),
             anti_alias: true,
             ..Paint::default()
         };
-
-        let converge = if state == VisualState::Recording {
-            0.0
-        } else {
-            (state_since.elapsed().as_secs_f32() * 5.5).clamp(0.0, 1.0)
+        let glow = Paint {
+            shader: glow_shader(start_x, start_x + group_width),
+            ..Paint::default()
         };
-        let center_x = rect.left() + rect.width() * 0.5;
 
         for (index, height) in heights.iter().enumerate().take(BAR_COUNT) {
             let original_x = start_x + index as f32 * (bar_width + gap);
             let x = original_x + (center_x - original_x) * converge;
-            let height = height.max(3.0 * scale).min(30.0 * scale);
+            let height = (*height * gate).clamp(0.0, 19.0) * scale;
+            if height < 0.7 * scale {
+                continue;
+            }
             let top = center_y - height * 0.5;
             if let Some(path) = rounded_rect(
                 Rect::from_xywh(x, top, bar_width, height).unwrap_or(rect),
@@ -473,22 +533,18 @@ impl Ctx {
                     None,
                 );
             }
-            // ごく淡い発光を重ね、透明感を出す。
-            let glow = Paint {
-                shader: glow_shader.clone(),
-                ..Paint::default()
-            };
-            let glow_rect = Rect::from_xywh(
-                x - 1.4 * scale,
-                top - 1.1 * scale,
-                bar_width + 2.8 * scale,
-                height + 2.2 * scale,
-            );
-            if converge < 0.9
-                && let Some(glow_rect) = glow_rect
-                && let Some(path) = rounded_rect(glow_rect, (bar_width + 2.8 * scale) * 0.5)
-            {
-                pixmap.fill_path(&path, &glow, FillRule::Winding, Transform::identity(), None);
+            if converge < 0.9 && gate > 0.2 {
+                let glow_rect = Rect::from_xywh(
+                    x - 1.4 * scale,
+                    top - 1.1 * scale,
+                    bar_width + 2.8 * scale,
+                    height + 2.2 * scale,
+                );
+                if let Some(glow_rect) = glow_rect
+                    && let Some(path) = rounded_rect(glow_rect, (bar_width + 2.8 * scale) * 0.5)
+                {
+                    pixmap.fill_path(&path, &glow, FillRule::Winding, Transform::identity(), None);
+                }
             }
         }
     }
@@ -632,30 +688,31 @@ fn pixel_size(scale: f32) -> (i32, i32) {
     )
 }
 
-fn pill_rect(scale: f32) -> Rect {
+fn content_rect(width: f32, height: f32, scale: f32) -> Rect {
+    let width = (width * scale).max(1.0);
+    let height = (height * scale).max(1.0);
     Rect::from_xywh(
-        (WINDOW_WIDTH - PILL_WIDTH) * 0.5 * scale,
-        (WINDOW_HEIGHT - PILL_HEIGHT) * 0.5 * scale,
-        PILL_WIDTH * scale,
-        PILL_HEIGHT * scale,
+        (WINDOW_WIDTH * scale - width) * 0.5,
+        (WINDOW_HEIGHT * scale - height) * 0.5,
+        width,
+        height,
     )
     .unwrap_or_else(|| Rect::from_xywh(0.0, 0.0, 1.0, 1.0).expect("1x1 の有効な矩形"))
 }
 
-fn shadow_paths(scale: f32) -> Vec<Path> {
-    let rect = pill_rect(scale);
-    let mut paths = Vec::with_capacity(8);
-    for step in 0..8 {
-        let expand = (7.0 - step as f32) * 1.15 * scale;
+fn shadow_paths(rect: Rect, scale: f32) -> Vec<Path> {
+    let mut paths = Vec::with_capacity(7);
+    for step in 0..7 {
+        let expand = (6.0 - step as f32) * 1.15 * scale;
         let Some(expanded) = Rect::from_xywh(
             rect.left() - expand,
-            rect.top() - expand + 2.4 * scale,
+            rect.top() - expand + 2.0 * scale,
             rect.width() + expand * 2.0,
             rect.height() + expand * 2.0,
         ) else {
             continue;
         };
-        if let Some(path) = rounded_rect(expanded, (PILL_HEIGHT * scale + expand * 2.0) * 0.5) {
+        if let Some(path) = rounded_rect(expanded, expanded.height() * 0.5) {
             paths.push(path);
         }
     }
@@ -708,15 +765,31 @@ fn rounded_rect(rect: Rect, radius: f32) -> Option<Path> {
     builder.finish()
 }
 
-fn bar_gradient() -> Shader<'static> {
+fn background_shader(rect: Rect) -> Shader<'static> {
+    let stops = vec![
+        GradientStop::new(0.0, Color::from_rgba8(255, 255, 255, 236)),
+        GradientStop::new(0.55, Color::from_rgba8(250, 252, 255, 214)),
+        GradientStop::new(1.0, Color::from_rgba8(234, 244, 255, 196)),
+    ];
+    LinearGradient::new(
+        tiny_skia::Point::from_xy(rect.left(), rect.top()),
+        tiny_skia::Point::from_xy(rect.left(), rect.bottom()),
+        stops,
+        SpreadMode::Pad,
+        Transform::identity(),
+    )
+    .unwrap_or_else(|| Shader::SolidColor(Color::from_rgba8(255, 255, 255, 220)))
+}
+
+fn bar_shader(start: f32, end: f32) -> Shader<'static> {
     let stops = vec![
         GradientStop::new(0.0, Color::from_rgba8(56, 189, 248, 255)),
         GradientStop::new(0.52, Color::from_rgba8(96, 165, 250, 255)),
         GradientStop::new(1.0, Color::from_rgba8(99, 102, 241, 255)),
     ];
     LinearGradient::new(
-        tiny_skia::Point::from_xy(0.0, 0.0),
-        tiny_skia::Point::from_xy(PILL_WIDTH, 0.0),
+        tiny_skia::Point::from_xy(start, 0.0),
+        tiny_skia::Point::from_xy(end, 0.0),
         stops,
         SpreadMode::Pad,
         Transform::identity(),
@@ -724,35 +797,19 @@ fn bar_gradient() -> Shader<'static> {
     .unwrap_or_else(|| Shader::SolidColor(Color::from_rgba8(99, 102, 241, 255)))
 }
 
-fn glow_gradient() -> Shader<'static> {
+fn glow_shader(start: f32, end: f32) -> Shader<'static> {
     let stops = vec![
-        GradientStop::new(0.0, Color::from_rgba8(56, 189, 248, 34)),
-        GradientStop::new(1.0, Color::from_rgba8(99, 102, 241, 22)),
+        GradientStop::new(0.0, Color::from_rgba8(56, 189, 248, 32)),
+        GradientStop::new(1.0, Color::from_rgba8(99, 102, 241, 20)),
     ];
     LinearGradient::new(
-        tiny_skia::Point::from_xy(0.0, 0.0),
-        tiny_skia::Point::from_xy(PILL_WIDTH, 0.0),
+        tiny_skia::Point::from_xy(start, 0.0),
+        tiny_skia::Point::from_xy(end, 0.0),
         stops,
         SpreadMode::Pad,
         Transform::identity(),
     )
-    .unwrap_or_else(|| Shader::SolidColor(Color::from_rgba8(99, 102, 241, 24)))
-}
-
-fn background_gradient() -> Shader<'static> {
-    let stops = vec![
-        GradientStop::new(0.0, Color::from_rgba8(255, 255, 255, 236)),
-        GradientStop::new(0.55, Color::from_rgba8(250, 252, 255, 216)),
-        GradientStop::new(1.0, Color::from_rgba8(236, 245, 255, 198)),
-    ];
-    LinearGradient::new(
-        tiny_skia::Point::from_xy(0.0, 0.0),
-        tiny_skia::Point::from_xy(0.0, PILL_HEIGHT),
-        stops,
-        SpreadMode::Pad,
-        Transform::identity(),
-    )
-    .unwrap_or_else(|| Shader::SolidColor(Color::from_rgba8(255, 255, 255, 220)))
+    .unwrap_or_else(|| Shader::SolidColor(Color::from_rgba8(99, 102, 241, 22)))
 }
 
 unsafe extern "system" fn wnd_proc(

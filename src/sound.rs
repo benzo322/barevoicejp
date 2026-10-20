@@ -1,7 +1,7 @@
 //! 通知音の合成と再生。
 //!
-//! 外部ファイルを使わず、短いサイン波をフェード付きで合成する。
-//! 開始音は控えめな「ポッ」、完了音は少しだけ高い「ポン」。
+//! 外部ファイルを使わず、柔らかいサイン波を合成する。開始音は低めの
+//! 「フワン…」、完了音は 440Hz を中心とした和音が余韻を残して消える。
 
 use std::f32::consts::TAU;
 use std::time::Duration;
@@ -18,10 +18,15 @@ pub enum Cue {
 impl Cue {
     fn duration(self) -> f32 {
         match self {
-            Self::Start => 0.16,
-            Self::Finish => 0.34,
+            Self::Start => 0.12,
+            Self::Finish => 0.55,
         }
     }
+}
+
+fn smoothstep(value: f32) -> f32 {
+    let value = value.clamp(0.0, 1.0);
+    value * value * (3.0 - 2.0 * value)
 }
 
 /// 通知音を合成する。値域は -1.0..=1.0。
@@ -30,8 +35,10 @@ pub fn synthesize(cue: Cue, sample_rate: u32, volume: f32) -> Vec<f32> {
     let duration = cue.duration();
     let count = (duration * rate) as usize;
     let volume = volume.clamp(0.0, 1.0);
-    let mut phase = 0.0f32;
     let mut samples = Vec::with_capacity(count);
+    let mut phase = 0.0f32;
+    let mut second = 0.0f32;
+    let mut third = 0.0f32;
 
     for index in 0..count {
         let t = index as f32 / rate;
@@ -40,25 +47,30 @@ pub fn synthesize(cue: Cue, sample_rate: u32, volume: f32) -> Vec<f32> {
         } else {
             0.0
         };
-        let frequency = match cue {
-            // わずかに上がることで「ポッ」と感じさせる。
-            Cue::Start => 520.0 + 170.0 * (progress * progress),
-            // 2 音を滑らかにつなぐ、柔らかい完了音。
-            Cue::Finish => 620.0 + 300.0 * progress,
-        };
-        phase += TAU * frequency / rate;
 
-        let fade_in = (t / 0.008).clamp(0.0, 1.0);
-        let fade_out = (((1.0 - progress) * duration) / 0.09).clamp(0.0, 1.0);
-        let decay = (-4.2 * progress).exp();
-        let envelope = fade_in * fade_out * decay;
-
-        let fundamental = phase.sin();
-        let overtone = match cue {
-            Cue::Start => 0.0,
-            Cue::Finish => (phase * 2.0).sin() * 0.18 * progress,
+        let sample = match cue {
+            Cue::Start => {
+                // 390Hz から 355Hz へわずかに下がる、温かいサイン波。
+                let frequency = 390.0 - 35.0 * progress;
+                phase += TAU * frequency / rate;
+                let attack = smoothstep(t / 0.030);
+                let release = smoothstep(((1.0 - progress) * duration) / 0.070);
+                let decay = (-1.6 * progress).exp();
+                phase.sin() * attack * release * decay * volume * 0.34
+            }
+            Cue::Finish => {
+                // A4 / C#5 / E5 の和音。少しずつ下降させ、空間に溶かす。
+                phase += TAU * (440.0 - 2.0 * progress) / rate;
+                second += TAU * (554.365 - 2.0 * progress) / rate;
+                third += TAU * (659.255 - 3.0 * progress) / rate;
+                let attack = smoothstep(t / 0.025);
+                let release = smoothstep(((1.0 - progress) * duration) / 0.50);
+                let decay = (-2.4 * progress).exp();
+                let chord = phase.sin() * 0.55 + second.sin() * 0.27 + third.sin() * 0.18;
+                chord * attack * release * decay * volume * 0.34
+            }
         };
-        samples.push((fundamental + overtone) * envelope * volume * 0.42);
+        samples.push(sample);
     }
     samples
 }
@@ -152,6 +164,19 @@ mod tests {
             assert!(samples[0].abs() < 1e-6);
             assert!(samples.last().copied().unwrap_or(1.0).abs() < 1e-6);
         }
+    }
+
+    #[test]
+    fn start_cue_has_a_gentle_attack() {
+        let rate = 44_100u32;
+        let samples = synthesize(Cue::Start, rate, 1.0);
+        let at = |millis: f32| samples[(rate as f32 * millis / 1000.0) as usize].abs();
+        assert!(
+            at(30.0) > at(5.0) * 2.0,
+            "attack should ramp smoothly: 5ms={}, 30ms={}",
+            at(5.0),
+            at(30.0)
+        );
     }
 
     #[test]

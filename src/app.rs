@@ -473,19 +473,31 @@ impl App {
     }
 
     /// マイクを開き直す。既存のリングバッファとレベルは再利用する。
+    ///
+    /// デバイス切替直後は旧ストリームの解放が完了しておらず、開き直しに
+    /// 失敗することがあるため、短い間隔で数回再試行する。
     pub fn restart_capture(&mut self, config: &Config) -> Result<(), String> {
         self.capture = None;
-        match AudioCapture::start(config, Arc::clone(&self.ring), Arc::clone(&self.level)) {
-            Ok(capture) => {
-                self.capture = Some(capture);
-                self.capture_error = None;
-                Ok(())
-            }
-            Err(exc) => {
-                self.capture_error = Some(exc.clone());
-                Err(exc)
+        self.level.store(0.0f32.to_bits(), Ordering::Relaxed);
+        let mut last_error = None;
+        for attempt in 0..3 {
+            match AudioCapture::start(config, Arc::clone(&self.ring), Arc::clone(&self.level)) {
+                Ok(capture) => {
+                    self.capture = Some(capture);
+                    self.capture_error = None;
+                    return Ok(());
+                }
+                Err(exc) => {
+                    last_error = Some(exc);
+                    if attempt < 2 {
+                        thread::sleep(Duration::from_millis(140));
+                    }
+                }
             }
         }
+        let exc = last_error.unwrap_or_else(|| "マイクを開けませんでした".to_string());
+        self.capture_error = Some(exc.clone());
+        Err(exc)
     }
 
     pub fn apply_config(&self, config: Config) {

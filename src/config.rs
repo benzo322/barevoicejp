@@ -240,7 +240,7 @@ impl Default for Config {
             whisper_turbo_model_dir: default_model_dir(WHISPER_TURBO_DIR_NAME),
             num_threads: 2,
             provider: "cpu".to_string(),
-            language: "auto".to_string(),
+            language: "ja".to_string(),
             use_itn: true,
             hotwords_score: 2.0,
 
@@ -395,10 +395,9 @@ impl Settings {
         config.input_mode = InputMode::parse(&self.input_mode);
         config.autostart = self.autostart;
         config.device = self.device.clone().filter(|value| !value.trim().is_empty());
-        if matches!(
-            self.language.as_str(),
-            "auto" | "ja" | "en" | "zh" | "ko" | "yue"
-        ) {
+        // 旧バージョンの `auto` は日本語誤爆の原因になるため引き継がない。
+        // 明示的に auto を使いたい場合は CLI の --language auto を使う。
+        if matches!(self.language.as_str(), "ja" | "en" | "zh" | "ko" | "yue") {
             config.language.clone_from(&self.language);
         }
         config.num_threads = self.num_threads.clamp(1, 16);
@@ -477,7 +476,7 @@ SenseVoice / ReazonSpeech / Whisper を使う Push-to-Talk 音声入力 (Windows
   --hotkey KEY               押している間だけ録音するキー (既定: alt_r)
   --paste-modifier MOD       貼り付けの修飾キー (既定: ctrl)
   --device SPEC              入力デバイス番号または名前の一部
-  --language LANG            SenseVoice の認識言語 (auto/ja/en/zh/ko/yue)
+  --language LANG            SenseVoice の認識言語 (既定: ja / auto/en/zh/ko/yue)
                              Whisper は ja 固定
   --num-threads N            CPU 推論スレッド数 (既定: 2)
   --provider NAME            ONNX Runtime provider (既定: cpu)
@@ -726,6 +725,22 @@ mod tests {
         let text = toml::to_string_pretty(&settings).expect("TOML へ変換");
         let parsed: Settings = toml::from_str(&text).expect("TOML から復元");
         assert_eq!(parsed, settings);
+    }
+
+    #[test]
+    fn language_defaults_to_ja_and_stale_auto_is_ignored() {
+        let mut config = Config::default();
+        assert_eq!(config.language, "ja");
+
+        let mut settings = Settings::from_config(&config);
+        settings.language = "auto".to_string();
+        settings.apply_to(&mut config);
+        assert_eq!(config.language, "ja");
+
+        config.apply_cli(
+            &parse_args(["--language".to_string(), "auto".to_string()]).expect("--language auto"),
+        );
+        assert_eq!(config.language, "auto");
     }
 
     #[test]

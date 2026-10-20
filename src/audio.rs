@@ -310,8 +310,10 @@ fn select_device(host: &cpal::Host, spec: Option<&str>) -> Result<cpal::Device, 
     let spec = spec.trim();
 
     if let Ok(index) = spec.parse::<usize>() {
+        // 設定画面の一覧は input_devices() と同じ並び。出力デバイスを
+        // 含む devices() を使うと番号がずれて別のマイクを開いてしまう。
         let devices: Vec<cpal::Device> = host
-            .devices()
+            .input_devices()
             .map_err(|exc| format!("入力デバイス一覧を取得できません: {exc}"))?
             .collect();
         return devices.into_iter().nth(index).ok_or_else(|| {
@@ -416,8 +418,9 @@ where
             } else {
                 (mono.iter().map(|sample| sample * sample).sum::<f32>() / mono.len() as f32).sqrt()
             };
-            // 立ち上がりは速く、減衰はゆっくり。メーターが自然に揺れる。
-            let coefficient = if rms > smoothed { 0.55 } else { 0.10 };
+            // 声の立ち上がりへ即座に追従し、無音へも素早く戻す。
+            // ここで強く平滑化しすぎると、バーが声より遅れて見える。
+            let coefficient = if rms > smoothed { 0.88 } else { 0.30 };
             smoothed += (rms - smoothed) * coefficient;
             level.store(smoothed.to_bits(), Ordering::Relaxed);
 
@@ -495,7 +498,7 @@ pub fn list_input_devices() -> i32 {
     let default_name = host
         .default_input_device()
         .and_then(|device| device.name().ok());
-    let devices: Vec<cpal::Device> = match host.devices() {
+    let devices: Vec<cpal::Device> = match host.input_devices() {
         Ok(devices) => devices.collect(),
         Err(exc) => {
             crate::error!("オーディオデバイスを取得できません: {exc}");
