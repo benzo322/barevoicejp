@@ -14,6 +14,21 @@ use crate::config::{self, Config};
 
 const RELEASE: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
 
+/// ダウンロード用 HTTP クライアント。
+///
+/// ureq の TLS プロバイダは既定で Rustls だが、本クレートは native-tls のみを
+/// 有効にしている。プロバイダを明示しないと HTTPS 接続時に ureq が panic する。
+static HTTP: LazyLock<ureq::Agent> = LazyLock::new(|| {
+    let config = ureq::Agent::config_builder()
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .provider(ureq::tls::TlsProvider::NativeTls)
+                .build(),
+        )
+        .build();
+    ureq::Agent::new_with_config(config)
+});
+
 /// 設定画面に表示するモデル。
 pub(crate) struct ModelSpec {
     pub(crate) id: &'static str,
@@ -308,7 +323,8 @@ fn run_download(id: &str, spec: &ModelSpec, dest: &Path) {
 
 /// tar.bz2 を `.part` ファイルへ受信し、完了後に確定する。
 fn fetch(id: &str, url: &str, archive: &Path) -> Result<(), String> {
-    let response = ureq::get(url)
+    let response = HTTP
+        .get(url)
         .call()
         .map_err(|exc| format!("ダウンロードできません: {exc}"))?;
     let total = response
