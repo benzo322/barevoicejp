@@ -269,6 +269,9 @@ function renderControls() {
   const paths = state.paths || {};
   $("#dictPaths").innerHTML = `<b>words.txt</b> ${esc(paths.words || "")}<br><b>config.toml</b> ${esc(paths.config || "")}`;
   $("#aboutPaths").innerHTML = `<b>設定</b> ${esc(paths.config || "")}<br><b>モデル</b> ${esc(paths.models || "")}<br><b>単語辞書</b> ${esc(paths.words || "")}`;
+  $("#modelPaths").innerHTML = paths.models
+    ? `<b>ダウンロード先</b> <span title="${esc(paths.models)}">${esc(paths.models)}</span>`
+    : "";
   $("#configPath").textContent = paths.config || "";
   $("#version").textContent = `v${state.version || "0.1.0"}`;
 }
