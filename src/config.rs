@@ -82,11 +82,17 @@ pub(crate) const MS_PER_SECOND_F64: f64 = MS_PER_SECOND as f64;
 /// `models/` のルートを探す。
 ///
 /// リファレンスはスクリプトと同じディレクトリの `models/` を使う。
-/// Rust 版はビルド時のマニフェスト位置 → exe の隣 → カレントディレクトリの順に
-/// 実在するものを採用する。どこにも無ければマニフェスト位置 (開発時) か
-/// カレントディレクトリを使う。
+/// Rust 版は exe の隣 → カレントディレクトリの順に実在するものを採用し、
+/// 開発ビルド (`cargo run`) だけはマニフェスト位置を最優先する。
+/// どこにも無ければ exe の隣 (無ければカレントディレクトリ) を使う。
+///
+/// `CARGO_MANIFEST_DIR` はビルドしたマシンの絶対パスがバイナリへ焼き込まれる。
+/// 配布ビルドで参照すると、インストール先の exe ではなくビルド元の
+/// `models/` (= `config.toml` を含むデータルート) を拾ってしまうため、
+/// リリースビルドでは候補に含めない。
 pub(crate) fn models_root() -> PathBuf {
     let mut candidates: Vec<PathBuf> = Vec::with_capacity(3);
+    #[cfg(debug_assertions)]
     if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
         candidates.push(PathBuf::from(manifest).join("models"));
     }
