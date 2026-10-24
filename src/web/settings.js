@@ -273,7 +273,7 @@ function renderControls() {
     ? `<b>ダウンロード先</b> <span title="${esc(paths.models)}">${esc(paths.models)}</span>`
     : "";
   $("#configPath").textContent = paths.config || "";
-  $("#version").textContent = `v${state.version || "0.1.0"}`;
+  $("#version").textContent = `v${state.version || "0.1.1"}`;
 }
 
 // 受信した状態を各セクションへ反映する。
