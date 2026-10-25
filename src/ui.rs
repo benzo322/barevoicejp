@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use serde_json::{Value, json};
 use tao::dpi::{LogicalSize, PhysicalPosition};
 use tao::event::{Event, WindowEvent};
@@ -42,14 +43,33 @@ pub(crate) enum UiEvent {
     Quit,
 }
 
+/// 埋め込みページが持つ文書 URL を組み立てる。
+///
+/// wry の `with_html` は `NavigateToString` を使うが、WebView2 の実装は
+/// 内部で HTML を `data:text/html;charset=utf-8;base64,...` へ変換して
+/// ナビゲーションする。`about:blank` だけを許可していると、この変換後の
+/// 初回ナビゲーションが拒否されて設定画面が空になる。
+fn embedded_page_url(html: &str) -> String {
+    format!(
+        "data:text/html;charset=utf-8;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(html)
+    )
+}
+
 /// WebView が読み込んでよい URL か。
 ///
 /// 設定画面とオンボーディングは `with_html` で埋め込んだ静的ページだけを
-/// 表示する。WebView2 の `NavigateToString` は文書 URL を `about:blank` に
-/// するため、そこから派生するフラグメントだけを許可する。`data:` や任意の
-/// `about:` を許可すると、そのページが IPC (`window.ipc`) を叩ける状態になる。
-fn is_builtin_page(url: &str) -> bool {
-    url.is_empty() || url == "about:blank" || url.starts_with("about:blank#")
+/// 表示する。`embedded` はそのページの文書 URL で、完全一致するものだけを
+/// 許可する。任意の `data:` や `about:` を許可すると、そのページが IPC
+/// (`window.ipc`) を叩ける状態になるため、内容が一致しない URL は拒否する。
+fn is_builtin_page(url: &str, embedded: &str) -> bool {
+    url.is_empty()
+        || url == "about:blank"
+        || url.starts_with("about:blank#")
+        || url == embedded
+        || url
+            .strip_prefix(embedded)
+            .is_some_and(|rest| rest.starts_with('#'))
 }
 
 /// 設定画面に一度だけ表示する通知。
@@ -99,19 +119,22 @@ pub(crate) fn run(mut app: App) -> ! {
     place_window(&window);
 
     let ipc_proxy = proxy.clone();
+    let html = include_str!("web/settings.html");
+    let embedded = Arc::<str>::from(embedded_page_url(html));
+    let nav_embedded = Arc::clone(&embedded);
     let script: &'static str = include_str!("web/settings.js");
     let webview = match WebViewBuilder::new()
-        .with_html(include_str!("web/settings.html"))
+        .with_html(html)
         .with_initialization_script(script)
         .with_background_color((243, 247, 252, 255))
         .with_devtools(cfg!(debug_assertions))
-        .with_navigation_handler(|url| is_builtin_page(&url))
+        .with_navigation_handler(move |url| is_builtin_page(&url, &nav_embedded))
         .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
         .with_permission_handler(|_| wry::PermissionResponse::Deny)
         .with_ipc_handler(move |request| {
-            // 組み込みページ (about:blank) 以外からの IPC は受け付けない。
+            // 組み込みページ以外からの IPC は受け付けない。
             let source = request.uri().to_string();
-            if !is_builtin_page(&source) {
+            if !is_builtin_page(&source, &embedded) {
                 crate::warn!("組み込みページ以外からの IPC を拒否しました: {source}");
                 return;
             }
@@ -343,16 +366,19 @@ fn build_onboarding(
         .build(event_loop)
         .map_err(|exc| format!("オンボーディングウィンドウを作成できません: {exc}"))?;
 
+    let html = include_str!("web/onboarding.html");
+    let embedded = Arc::<str>::from(embedded_page_url(html));
+    let ipc_embedded = Arc::clone(&embedded);
     let webview = WebViewBuilder::new()
-        .with_html(include_str!("web/onboarding.html"))
+        .with_html(html)
         .with_background_color((247, 250, 255, 255))
         .with_devtools(cfg!(debug_assertions))
-        .with_navigation_handler(|url| is_builtin_page(&url))
+        .with_navigation_handler(move |url| is_builtin_page(&url, &embedded))
         .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
         .with_permission_handler(|_| wry::PermissionResponse::Deny)
         .with_ipc_handler(move |request| {
             let source = request.uri().to_string();
-            if !is_builtin_page(&source) {
+            if !is_builtin_page(&source, &ipc_embedded) {
                 crate::warn!("組み込みページ以外からの IPC を拒否しました: {source}");
                 return;
             }
@@ -682,18 +708,21 @@ fn snapshot(app: &App, settings: &Settings, notice: &Option<Notice>) -> Value {
         .map(|(target, reading)| json!({ "target": target, "reading": reading }))
         .collect::<Vec<_>>();
 
+    let model_source = if config.model_base_url.trim().is_empty() {
+        models::OFFICIAL_RELEASE.to_string()
+    } else {
+        config::redact_source(&config.model_base_url)
+    };
     let paths = std::env::current_dir()
         .map(|dir| {
             json!({
                 "words": dir.join(text::WORDS_PATH).display().to_string(),
                 "config": dir.join(config::CONFIG_PATH).display().to_string(),
                 "models": config::models_root().display().to_string(),
-                "modelSource": config::redact_source(&config.model_base_url),
+                "modelSource": &model_source,
             })
         })
-        .unwrap_or_else(
-            |_| json!({ "modelSource": config::redact_source(&config.model_base_url) }),
-        );
+        .unwrap_or_else(|_| json!({ "modelSource": &model_source }));
 
     json!({
         "settings": settings_for_ui(settings),
@@ -769,16 +798,45 @@ mod tests {
 
     #[test]
     fn allows_only_embedded_pages() {
-        for url in ["", "about:blank", "about:blank#models"] {
-            assert!(is_builtin_page(url), "{url} を拒否した");
+        let embedded = embedded_page_url(include_str!("web/settings.html"));
+        for url in [
+            "",
+            "about:blank",
+            "about:blank#models",
+            embedded.as_str(),
+            &format!("{embedded}#models"),
+        ] {
+            assert!(is_builtin_page(url, &embedded), "{url} を拒否した");
         }
         for url in [
             "about:config",
             "data:text/html,<script>alert(1)</script>",
             "https://example.com/",
             "file:///C:/Windows/System32/calc.exe",
+            embedded_page_url("not the settings page").as_str(),
         ] {
-            assert!(!is_builtin_page(url), "{url} を許可した");
+            assert!(!is_builtin_page(url, &embedded), "{url} を許可した");
+        }
+    }
+
+    #[test]
+    fn embedded_url_matches_navigatetostring_data_url() {
+        // WebView2 は NavigateToString を base64 の data URL として
+        // ナビゲーションする。設定画面とオンボーディングの両方で、
+        // その URL が組み込みページとして許可されること。
+        for html in [
+            include_str!("web/settings.html"),
+            include_str!("web/onboarding.html"),
+        ] {
+            let embedded = embedded_page_url(html);
+            assert!(
+                embedded.starts_with("data:text/html;charset=utf-8;base64,"),
+                "{}",
+                &embedded[..40]
+            );
+            assert!(is_builtin_page(&embedded, &embedded));
+            let altered = embedded_page_url(&format!("{html} "));
+            assert!(!is_builtin_page(&altered, &embedded));
         }
     }
 

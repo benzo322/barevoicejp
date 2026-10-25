@@ -303,12 +303,12 @@ function renderControls() {
   $("#aboutPaths").innerHTML = `<b>設定</b> ${esc(paths.config || "")}<br><b>モデル</b> ${esc(paths.models || "")}<br><b>単語辞書</b> ${esc(paths.words || "")}`;
   const sourceLine = paths.modelSource
     ? `<b>配布元</b> <span title="${esc(paths.modelSource)}">${esc(paths.modelSource)}</span>`
-    : `<b>配布元</b> <span style="color:#be123c">未設定（config.toml の model_base_url）</span>`;
+    : `<b>配布元</b> <span>公式リリース（GitHub）</span>`;
   $("#modelPaths").innerHTML = paths.models
     ? `<b>ダウンロード先</b> <span title="${esc(paths.models)}">${esc(paths.models)}</span><br>${sourceLine}`
     : sourceLine;
   $("#configPath").textContent = paths.config || "";
-  $("#version").textContent = `v${state.version || "0.1.2"}`;
+  $("#version").textContent = `v${state.version || "0.1.3"}`;
 }
 
 // 受信した状態を各セクションへ反映する。

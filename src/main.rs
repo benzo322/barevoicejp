@@ -67,7 +67,7 @@ fn main() {
         config.hotkey = "alt_r".to_string();
     }
     if config.model_base_url.trim().is_empty() {
-        info!("モデル配布元: 未設定 (config.toml の model_base_url)");
+        info!("モデル配布元: 公式リリース (GitHub)");
     } else {
         info!(
             "モデル配布元: {}",

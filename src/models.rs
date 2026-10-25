@@ -14,6 +14,13 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{self, Config};
 
+/// 公式リリース (sherpa-onnx / GitHub Releases) のアーカイブ置き場。
+///
+/// `model_base_url` が空のときは、ここから直接 tar.bz2 を取得する。
+/// 社内サーバーを使う場合は `config.toml` の `model_base_url` で上書きする。
+pub(crate) const OFFICIAL_RELEASE: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
+
 /// 配布元のルートに置く SHA-256 マニフェスト名。
 const MANIFEST_FILE: &str = "checksums.sha256";
 /// マニフェストの最大サイズ。壊れた/巨大なファイルを読み込まない。
@@ -120,21 +127,23 @@ fn spec(id: &str) -> Option<&'static ModelSpec> {
     SPECS.iter().find(|spec| spec.id == id)
 }
 
-/// モデルの配布元。社内 HTTPS サーバーまたは UNC/絶対パス共有。
+/// モデルの配布元。公式リリース、社内 HTTPS サーバー、UNC/絶対パス共有。
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Source {
+    /// `model_base_url` 未設定時の直接ダウンロード。
+    Official,
     Http(String),
     File(PathBuf),
 }
 
 impl Source {
     /// `config.toml` の `model_base_url` を解釈する。
+    ///
+    /// 空文字は公式リリースからの直接ダウンロードを意味する。
     fn parse(base: &str) -> Result<Self, String> {
         let base = base.trim().trim_end_matches('/');
         if base.is_empty() {
-            return Err("モデル配布元が未設定です。config.toml の model_base_url に\
-                 社内サーバーの URL または UNC パスを設定してください。"
-                .to_string());
+            return Ok(Self::Official);
         }
         if let Some(rest) = base.strip_prefix("http://") {
             // 平文 HTTP はマニフェストごと差し替えられるため、ローカル検証以外は許可しない。
@@ -171,6 +180,15 @@ impl Source {
         }
     }
 
+    /// HTTP 配布元のアーカイブ URL。ローカル共有なら `None`。
+    fn archive_url(&self, archive: &str) -> Option<String> {
+        match self {
+            Self::Official => Some(format!("{OFFICIAL_RELEASE}/{archive}")),
+            Self::Http(base) => Some(format!("{base}/{archive}")),
+            Self::File(_) => None,
+        }
+    }
+
     /// 配布元から SHA-256 マニフェストを読む。
     fn manifest_text(&self) -> Result<String, String> {
         match self {
@@ -198,6 +216,7 @@ impl Source {
                 }
                 Ok(text)
             }
+            Self::Official => Err(format!("公式リリースには {MANIFEST_FILE} がありません")),
             Self::File(dir) => {
                 let path = dir.join(MANIFEST_FILE);
                 let metadata = fs::metadata(&path).map_err(|exc| file_error(&path, exc))?;
@@ -252,12 +271,12 @@ fn http_error(url: &str, exc: ureq::Error) -> String {
     let url = config::redact_source(url);
     match &exc {
         ureq::Error::Timeout(_) => format!(
-            "社内サーバーに接続できません（タイムアウト）。\
-             VPN/社内LANの接続を確認してください: {url}"
+            "モデル配布元に接続できません（タイムアウト）。\
+             ネットワーク接続を確認してください: {url}"
         ),
         ureq::Error::HostNotFound => format!(
-            "社内サーバーのホスト名を解決できません。\
-             VPN/社内LANの接続を確認してください: {url}"
+            "モデル配布元のホスト名を解決できません。\
+             ネットワーク接続を確認してください: {url}"
         ),
         ureq::Error::StatusCode(code) => {
             format!("モデル配布元が HTTP {code} を返しました: {url}")
@@ -269,7 +288,7 @@ fn http_error(url: &str, exc: ureq::Error) -> String {
             )
         }
         ureq::Error::ConnectionFailed | ureq::Error::Io(_) => format!(
-            "社内サーバーに接続できません。VPN/社内LANの接続を確認してください: {url} ({exc})"
+            "モデル配布元に接続できません。ネットワーク接続を確認してください: {url} ({exc})"
         ),
         _ => format!("モデル配布元から取得できません: {url} ({exc})"),
     }
@@ -587,32 +606,41 @@ fn run_download_with_cache(
         return;
     }
     let archive = cache_dir.join(spec.archive);
-    let manifest = match source.manifest_text() {
-        Ok(manifest) => manifest,
-        Err(exc) => {
-            fail(id, exc);
-            return;
+    let expected = match &source {
+        Source::Official => {
+            crate::info!("公式リリースからモデルを取得します: {}", spec.archive);
+            None
+        }
+        _ => {
+            let manifest = match source.manifest_text() {
+                Ok(manifest) => manifest,
+                Err(exc) => {
+                    fail(id, exc);
+                    return;
+                }
+            };
+            let hashes = match parse_sha256_manifest(&manifest) {
+                Ok(hashes) => hashes,
+                Err(exc) => {
+                    fail(id, exc);
+                    return;
+                }
+            };
+            let Some(expected) = hashes.get(spec.archive) else {
+                fail(
+                    id,
+                    format!(
+                        "{MANIFEST_FILE} に {} の SHA-256 がありません。\
+                         配布元のマニフェストを確認してください。",
+                        spec.archive
+                    ),
+                );
+                return;
+            };
+            Some(expected.clone())
         }
     };
-    let hashes = match parse_sha256_manifest(&manifest) {
-        Ok(hashes) => hashes,
-        Err(exc) => {
-            fail(id, exc);
-            return;
-        }
-    };
-    let Some(expected) = hashes.get(spec.archive) else {
-        fail(
-            id,
-            format!(
-                "{MANIFEST_FILE} に {} の SHA-256 がありません。\
-                 配布元のマニフェストを確認してください。",
-                spec.archive
-            ),
-        );
-        return;
-    };
-    if let Err(exc) = fetch(id, &source, spec.archive, &archive, expected) {
+    if let Err(exc) = fetch(id, &source, spec.archive, &archive, expected.as_deref()) {
         fail(id, exc);
         return;
     }
@@ -655,12 +683,14 @@ fn fetch(
     source: &Source,
     archive_name: &str,
     archive: &Path,
-    expected: &str,
+    expected: Option<&str>,
 ) -> Result<(), String> {
     let part = archive.with_extension("part");
     let (reader, total): (Box<dyn Read>, u64) = match source {
-        Source::Http(base) => {
-            let url = format!("{base}/{archive_name}");
+        Source::Official | Source::Http(_) => {
+            let url = source
+                .archive_url(archive_name)
+                .expect("HTTP 配布元にはアーカイブ URL がある");
             let response = http_get(&HTTP, &url).map_err(|exc| http_error(&url, exc))?;
             let total = response
                 .body()
@@ -702,18 +732,20 @@ fn fetch(
             return Err(exc);
         }
     };
-    update(
-        id,
-        DownloadState {
-            phase: Phase::Verifying,
-            downloaded,
-            total: total.max(downloaded),
-            error: None,
-        },
-    );
-    if let Err(exc) = verify_sha256(&part, expected) {
-        let _ = fs::remove_file(&part);
-        return Err(exc);
+    if let Some(expected) = expected {
+        update(
+            id,
+            DownloadState {
+                phase: Phase::Verifying,
+                downloaded,
+                total: total.max(downloaded),
+                error: None,
+            },
+        );
+        if let Err(exc) = verify_sha256(&part, expected) {
+            let _ = fs::remove_file(&part);
+            return Err(exc);
+        }
     }
     if archive.exists() {
         let _ = fs::remove_file(archive);
@@ -943,7 +975,17 @@ mod tests {
             Ok(Source::File(path)) => assert!(path.is_absolute(), "{path:?}"),
             other => panic!("UNC パスとして解釈されない: {other:?}"),
         }
-        assert!(Source::parse("").is_err());
+        assert_eq!(Source::parse(""), Ok(Source::Official));
+        assert_eq!(
+            Source::Official.archive_url("model.tar.bz2").as_deref(),
+            Some(
+                "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/model.tar.bz2"
+            )
+        );
+        assert_eq!(
+            Source::Official.archive_url(""),
+            Some(format!("{OFFICIAL_RELEASE}/"))
+        );
         assert!(Source::parse("relative/models").is_err());
         assert!(Source::parse("htps://typo/models").is_err());
     }
@@ -1030,7 +1072,7 @@ BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  models/other.t
             &Source::File(source_dir.clone()),
             archive_name,
             &archive,
-            &expected,
+            Some(&expected),
         )
         .expect("コピーと検証");
         assert_eq!(fs::read(&archive).expect("archive"), payload);
@@ -1042,12 +1084,24 @@ BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  models/other.t
             &Source::File(source_dir),
             archive_name,
             &bad_archive,
-            &"0".repeat(64),
+            Some(&"0".repeat(64)),
         )
         .expect_err("ハッシュ不一致");
         assert!(error.contains("SHA-256"), "{error}");
         assert!(!bad_archive.exists());
         assert!(!bad_archive.with_extension("part").exists());
+
+        // 公式リリース直取得 (expected=None) はハッシュ検証を省いて確定する。
+        let unverified = cache_dir.join("unverified.tar.bz2");
+        fetch(
+            "test-file-unverified",
+            &Source::File(dir.join("source")),
+            archive_name,
+            &unverified,
+            None,
+        )
+        .expect("ハッシュなしのコピー");
+        assert_eq!(fs::read(&unverified).expect("archive"), payload);
 
         fs::remove_dir_all(dir).expect("後片付け");
     }
@@ -1101,7 +1155,7 @@ BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  models/other.t
         let hashes = parse_sha256_manifest(&manifest).expect("manifest parse");
         let expected = hashes.get(archive_name).expect("entry");
         let archive = dir.join(archive_name);
-        fetch("test-http", &source, archive_name, &archive, expected).expect("fetch");
+        fetch("test-http", &source, archive_name, &archive, Some(expected)).expect("fetch");
         assert_eq!(fs::read(&archive).expect("archive"), payload);
         server.join().expect("server");
         fs::remove_dir_all(dir).expect("後片付け");
@@ -1179,7 +1233,7 @@ BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  models/other.t
         let error = Source::Http(format!("http://{address}"))
             .manifest_text()
             .expect_err("接続失敗");
-        assert!(error.contains("社内サーバーに接続できません"), "{error}");
+        assert!(error.contains("モデル配布元に接続できません"), "{error}");
     }
 
     #[test]

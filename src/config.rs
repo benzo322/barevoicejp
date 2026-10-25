@@ -196,7 +196,8 @@ pub(crate) struct Config {
     pub(crate) use_itn: bool,
     /// ホットワード対応エンジン向けのスコア。現行エンジンでは未使用。
     pub(crate) hotwords_score: f32,
-    /// モデル配布元。`https://...` または `\\server\share\...`。
+    /// モデル配布元。空なら公式リリースから直接ダウンロードする。
+    /// `https://...` または `\\server\share\...` を指定すると社内配布元を使う。
     pub(crate) model_base_url: String,
 
     // --- 録音 / ホットキー ---
@@ -364,7 +365,8 @@ pub(crate) struct Settings {
     pub(crate) sound_volume: f32,
     pub(crate) sound_theme: String,
     pub(crate) floating_bar: bool,
-    /// モデル配布元。空ならダウンロード不可（外部への既定アクセスは行わない）。
+    /// モデル配布元。空なら公式リリース (GitHub) から直接ダウンロードする。
+    /// 社内サーバー / 共有フォルダを使う場合に指定する。
     #[serde(default)]
     pub(crate) model_base_url: String,
 }
