@@ -5,32 +5,40 @@
 //! - クリップボード (`CF_UNICODETEXT`) の読み書き。
 //! - `SendInput` による単発の Ctrl+V。
 
+use std::cell::RefCell;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
-use windows_sys::Win32::Foundation::{GetLastError, HANDLE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, LRESULT, WPARAM,
+};
 use windows_sys::Win32::System::Console::GetConsoleWindow;
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
     SetClipboardData,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows_sys::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW,
     RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
+use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, ReleaseCapture, SendInput,
     VK_CONTROL, VK_ESCAPE, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
     VK_RETURN, VK_RMENU, VK_RSHIFT, VK_SHIFT, VK_SPACE, VK_TAB, VK_V,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, CallNextHookEx, HHOOK, HTCAPTION, HWND_NOTOPMOST, HWND_TOPMOST,
-    KBDLLHOOKSTRUCT, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SendMessageW,
-    SetForegroundWindow, SetWindowPos, SetWindowsHookExW, ShowWindow, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_NCLBUTTONDOWN, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    BringWindowToTop, CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    GetForegroundWindow, HHOOK, HTCAPTION, HWND_MESSAGE, HWND_NOTOPMOST, HWND_TOPMOST,
+    KBDLLHOOKSTRUCT, RegisterClassW, SW_HIDE, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SendMessageW, SetForegroundWindow, SetWindowPos, SetWindowsHookExW, ShowWindow,
+    UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_NCLBUTTONDOWN, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WNDCLASSW,
 };
 
 use crate::config;
@@ -42,6 +50,10 @@ const FIRST_F_KEY: u16 = 1;
 const LAST_F_KEY: u16 = 12;
 /// `KBDLLHOOKSTRUCT.flags` の拡張キー bit (右 Alt 判定)。
 const LLKHF_EXTENDED: u32 = 0x01;
+/// `KBDLLHOOKSTRUCT.flags` の注入 bit。`SendInput` などの合成入力で立つ。
+const LLKHF_INJECTED: u32 = 0x10;
+/// 低い整合性レベルのプロセスから注入された入力で立つ。
+const LLKHF_LOWER_IL_INJECTED: u32 = 0x02;
 
 // windows-sys 0.61 に GlobalFree のバインディングが無いため直接宣言する。
 #[link(name = "kernel32")]
@@ -115,6 +127,14 @@ pub(crate) fn hide_console() {
     }
 }
 
+/// 現在のフォアグラウンドウィンドウ。取得できなければ 0。
+///
+/// 推論中に前面のウィンドウが変わっていないか確認するために使う。
+pub(crate) fn foreground_window() -> usize {
+    // SAFETY: 引数が無く、失敗時は NULL を返すだけ。
+    unsafe { GetForegroundWindow() as usize }
+}
+
 const AUTOSTART_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const AUTOSTART_VALUE: &str = "BAREVoiceJP";
 
@@ -186,6 +206,52 @@ pub(crate) fn set_autostart(enabled: bool) -> Result<(), String> {
     }
 }
 
+/// 二重起動を防ぐミューテックス名。
+///
+/// `Local\` はログオンセッション単位。同一セッション内の同一ユーザー
+/// (と、そのセッションへ入り込んだ管理者) だけが衝突する。
+const SINGLE_INSTANCE_NAME: &str = "Local\\BAREVoiceJP.SingleInstance";
+
+/// 単一インスタンスを保証する名前付きミューテックス。
+///
+/// ハンドルはプロセス終了まで保持する。既に同名ミューテックスが
+/// 存在した場合 (別プロセスが起動中) は `Err` を返す。
+pub(crate) struct SingleInstance {
+    handle: HANDLE,
+}
+
+impl SingleInstance {
+    /// 単一インスタンスを取得する。既に起動中なら `Err`。
+    pub(crate) fn acquire() -> Result<Self, String> {
+        let name = wide(SINGLE_INSTANCE_NAME);
+        // SAFETY: 名前は NUL 終端。成功時はクローズが必要なハンドルを返す。
+        unsafe {
+            let handle = CreateMutexW(std::ptr::null(), 1, name.as_ptr());
+            if handle.is_null() {
+                return Err(format!(
+                    "単一インスタンス用ミューテックスを作成できません (error={})",
+                    GetLastError()
+                ));
+            }
+            // 作成直後の GetLastError で既存ミューテックスを判定する。
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                CloseHandle(handle);
+                return Err("BAREVoiceJP は既に起動しています".to_string());
+            }
+            Ok(Self { handle })
+        }
+    }
+}
+
+impl Drop for SingleInstance {
+    fn drop(&mut self) {
+        // SAFETY: `acquire` が成功したハンドルを一度だけ閉じる。
+        unsafe {
+            CloseHandle(self.handle);
+        }
+    }
+}
+
 /// `alt_r` / `f9` / `ctrl_r` などのキー名を仮想キーコードへ変換する。
 ///
 /// `Key.` 接頭辞、`option`/`command`/`control` の別名も受け付ける。
@@ -252,15 +318,119 @@ pub(crate) fn parse_hotkey(spec: &str) -> Result<Hotkey, String> {
 // ---------------------------------------------------------------------------
 // クリップボード
 // ---------------------------------------------------------------------------
+/// クリップボードの所有者として使うメッセージ専用ウィンドウのクラス名。
+///
+/// `OpenClipboard(NULL)` で開くと `EmptyClipboard` が所有者を NULL にし、
+/// 続く `SetClipboardData` が必ず失敗する (Win32 の仕様)。書き込み時は
+/// このウィンドウを所有者として渡す。
+const CLIPBOARD_WINDOW_CLASS: &str = "BAREVoiceJP.ClipboardOwner";
+
+unsafe extern "system" fn clipboard_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // SAFETY: 既定処理へ委譲するだけ。引数は OS から渡された値。
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+/// ウィンドウクラスをプロセスで一度だけ登録する。
+fn register_clipboard_class() -> bool {
+    static REGISTERED: OnceLock<bool> = OnceLock::new();
+    *REGISTERED.get_or_init(|| {
+        let class = wide(CLIPBOARD_WINDOW_CLASS);
+        let window_class = WNDCLASSW {
+            style: 0,
+            lpfnWndProc: Some(clipboard_window_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            // SAFETY: 引数なし。失敗時は NULL が返るだけ。
+            hInstance: unsafe { GetModuleHandleW(std::ptr::null()) },
+            hIcon: std::ptr::null_mut(),
+            hCursor: std::ptr::null_mut(),
+            hbrBackground: std::ptr::null_mut(),
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: class.as_ptr(),
+        };
+        // SAFETY: クラス名は NUL 終端で、この呼び出しの間だけ生きている。
+        unsafe { RegisterClassW(&window_class) != 0 }
+    })
+}
+
+/// スレッドごとのメッセージ専用ウィンドウ。
+///
+/// `OpenClipboard` を呼ぶスレッドで作ることで、ウィンドウのスレッド親和性を
+/// 保ったままクリップボードの所有者として使える。
+struct ClipboardOwner {
+    hwnd: HWND,
+}
+
+impl ClipboardOwner {
+    fn create() -> Option<Self> {
+        if !register_clipboard_class() {
+            return None;
+        }
+        let class = wide(CLIPBOARD_WINDOW_CLASS);
+        let title = wide("BAREVoiceJP clipboard owner");
+        // SAFETY: 登録済みクラス名と NUL 終端のタイトルを渡す。
+        // メッセージ専用ウィンドウは親に HWND_MESSAGE を指定して作る。
+        let hwnd = unsafe {
+            CreateWindowExW(
+                0,
+                class.as_ptr(),
+                title.as_ptr(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                std::ptr::null_mut(),
+                GetModuleHandleW(std::ptr::null()),
+                std::ptr::null(),
+            )
+        };
+        (!hwnd.is_null()).then_some(Self { hwnd })
+    }
+}
+
+impl Drop for ClipboardOwner {
+    fn drop(&mut self) {
+        // SAFETY: このスレッドで作ったウィンドウを同じスレッドで破棄する。
+        unsafe {
+            DestroyWindow(self.hwnd);
+        }
+    }
+}
+
+thread_local! {
+    static CLIPBOARD_OWNER: RefCell<Option<ClipboardOwner>> = const { RefCell::new(None) };
+}
+
+/// このスレッドの所有者ウィンドウ。作成できなければ `None`。
+fn clipboard_owner() -> Option<HWND> {
+    CLIPBOARD_OWNER.with(|owner| {
+        let mut owner = owner.borrow_mut();
+        if owner.is_none() {
+            *owner = ClipboardOwner::create();
+        }
+        owner.as_ref().map(|owner| owner.hwnd)
+    })
+}
+
 /// クリップボードのオープン/クローズを RAII で管理する。
 struct ClipboardGuard;
 
 impl ClipboardGuard {
     /// 他のプロセスが保持している場合に備えて数回再試行する。
-    fn open() -> Result<Self, String> {
+    ///
+    /// `owner` にはこのスレッドの所有者ウィンドウを渡す。読み取りだけで
+    /// あれば NULL でもよいが、書き込みには必須。
+    fn open(owner: HWND) -> Result<Self, String> {
         for _ in 0..config::CLIPBOARD_OPEN_ATTEMPTS {
-            // SAFETY: NULL オーナーで現在のタスクにクリップボードを開く。
-            if unsafe { OpenClipboard(std::ptr::null_mut()) } != 0 {
+            // SAFETY: owner はこのスレッドが作ったウィンドウ、または NULL。
+            if unsafe { OpenClipboard(owner) } != 0 {
                 return Ok(Self);
             }
             std::thread::sleep(Duration::from_millis(config::CLIPBOARD_OPEN_RETRY_MS));
@@ -283,7 +453,9 @@ impl Drop for ClipboardGuard {
 
 /// クリップボードのテキストを読み取る。テキストが無ければ空文字列。
 pub(crate) fn clipboard_get() -> Result<String, String> {
-    let _clipboard = ClipboardGuard::open()?;
+    // 読み取りだけなら所有者は不要。ウィンドウがあれば流用する。
+    let owner = clipboard_owner().unwrap_or(std::ptr::null_mut());
+    let _clipboard = ClipboardGuard::open(owner)?;
     // SAFETY: ガードがクリップボードを開いたまま保持している。
     unsafe {
         if IsClipboardFormatAvailable(CF_UNICODETEXT) == 0 {
@@ -297,9 +469,12 @@ pub(crate) fn clipboard_get() -> Result<String, String> {
         if pointer.is_null() {
             return Err("クリップボードの内容をロックできません".to_string());
         }
+        // 他プロセスが NUL 終端していない CF_UNICODETEXT を置く場合に備え、
+        // 割り当てサイズを超えて読み進めない。
+        let capacity = (GlobalSize(handle as _) as usize) / std::mem::size_of::<u16>();
         let wide = pointer as *const u16;
         let mut length = 0usize;
-        while *wide.add(length) != 0 {
+        while length < capacity && *wide.add(length) != 0 {
             length += 1;
         }
         let text = String::from_utf16_lossy(std::slice::from_raw_parts(wide, length));
@@ -310,35 +485,50 @@ pub(crate) fn clipboard_get() -> Result<String, String> {
 
 /// クリップボードを UTF-16 テキストで置き換える。
 pub(crate) fn clipboard_set(text: &str) -> Result<(), String> {
+    let owner = clipboard_owner()
+        .ok_or_else(|| "クリップボードの所有者ウィンドウを作成できません".to_string())?;
     let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let bytes = wide.len() * std::mem::size_of::<u16>();
 
-    let _clipboard = ClipboardGuard::open()?;
-    // SAFETY: ガードがクリップボードを保持し、メモリは成功時のみ所有権を移す。
+    // メモリを先に確保してから空にする。確保に失敗しても既存の内容を失わない。
+    let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) };
+    if handle.is_null() {
+        return Err(format!(
+            "クリップボード用メモリを確保できません (error={})",
+            unsafe { GetLastError() }
+        ));
+    }
+    // SAFETY: handle はこの関数が所有する GMEM_MOVEABLE の領域。
+    let pointer = unsafe { GlobalLock(handle) };
+    if pointer.is_null() {
+        let error = unsafe { GetLastError() };
+        // SAFETY: まだクリップボードへ渡していないので所有権はこちらにある。
+        unsafe { GlobalFree(handle) };
+        return Err(format!(
+            "クリップボード用メモリをロックできません (error={error})"
+        ));
+    }
     unsafe {
-        if EmptyClipboard() == 0 {
-            return Err(format!(
-                "クリップボードを空にできません (error={})",
-                GetLastError()
-            ));
-        }
-        let handle = GlobalAlloc(GMEM_MOVEABLE, bytes);
-        if handle.is_null() {
-            return Err(format!(
-                "クリップボード用メモリを確保できません (error={})",
-                GetLastError()
-            ));
-        }
-        let pointer = GlobalLock(handle);
-        if pointer.is_null() {
-            let error = GetLastError();
-            GlobalFree(handle);
-            return Err(format!(
-                "クリップボード用メモリをロックできません (error={error})"
-            ));
-        }
         std::ptr::copy_nonoverlapping(wide.as_ptr(), pointer as *mut u16, wide.len());
         GlobalUnlock(handle);
+    }
+
+    let _clipboard = match ClipboardGuard::open(owner) {
+        Ok(guard) => guard,
+        Err(exc) => {
+            // SAFETY: まだクリップボードへ渡していないので所有権はこちらにある。
+            unsafe { GlobalFree(handle) };
+            return Err(exc);
+        }
+    };
+    // SAFETY: ガードがクリップボードを保持し、成功時のみ所有権を移す。
+    // 所有者が有効なウィンドウなので EmptyClipboard 後も SetClipboardData は成功する。
+    unsafe {
+        if EmptyClipboard() == 0 {
+            let error = GetLastError();
+            GlobalFree(handle);
+            return Err(format!("クリップボードを空にできません (error={error})"));
+        }
         if SetClipboardData(CF_UNICODETEXT, handle as HANDLE).is_null() {
             let error = GetLastError();
             GlobalFree(handle);
@@ -478,12 +668,22 @@ fn is_right_alt(vk: u16, flags: u32) -> bool {
     vk == VK_RMENU || (vk == VK_MENU && flags & LLKHF_EXTENDED != 0)
 }
 
+/// 合成入力かどうか。合成入力はホットキーとして扱わない。
+///
+/// 自前の Ctrl+V (`SendInput`) による自己トリガーと、他プロセスが
+/// 注入したキーで録音が始まるのを防ぐ。
+fn is_injected(flags: u32) -> bool {
+    flags & (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED) != 0
+}
+
 /// フック内のパニックで OS の入力処理を止めないよう包んで実行する。
 fn fire(callback: &(dyn Fn() + Send + Sync)) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
 }
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: usize, lparam: isize) -> isize {
+    // この範囲ではログのファイル I/O をキューへ退避する (パニック時も含む)。
+    let _hook_scope = crate::logging::HookScope::enter();
     if code < 0 {
         return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
     }
@@ -492,6 +692,11 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: usize, lparam: isize) -> 
     };
 
     let keyboard = unsafe { &*(lparam as *const KBDLLHOOKSTRUCT) };
+    // 合成入力 (SendInput / keybd_event / 低い整合性レベルからの注入) は
+    // アプリのホットキーとして扱わない。OS へはそのまま通す。
+    if is_injected(keyboard.flags) {
+        return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+    }
     let message = wparam as u32;
     let down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
     let up = message == WM_KEYUP || message == WM_SYSKEYUP;
@@ -527,4 +732,97 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: usize, lparam: isize) -> 
     }
 
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use windows_sys::Win32::UI::WindowsAndMessaging::HC_ACTION;
+
+    #[test]
+    fn treats_injected_keyboard_flags_as_injected() {
+        assert!(is_injected(LLKHF_INJECTED));
+        assert!(is_injected(LLKHF_LOWER_IL_INJECTED));
+        assert!(is_injected(LLKHF_INJECTED | LLKHF_EXTENDED));
+        assert!(!is_injected(0));
+        assert!(!is_injected(LLKHF_EXTENDED));
+    }
+
+    /// フックコールバック本体に合成入力を渡し、コールバックが呼ばれない
+    /// ことを確認する。通常入力では呼ばれることも同じテストで確かめる。
+    #[test]
+    fn hook_ignores_injected_events() {
+        static PRESSES: AtomicUsize = AtomicUsize::new(0);
+        static RELEASES: AtomicUsize = AtomicUsize::new(0);
+
+        fn dispatch(keyboard: &KBDLLHOOKSTRUCT, message: u32) {
+            // SAFETY: keyboard は呼び出しの間だけ生きている実体を指す。
+            unsafe {
+                hook_proc(
+                    HC_ACTION as i32,
+                    message as usize,
+                    keyboard as *const KBDLLHOOKSTRUCT as isize,
+                );
+            }
+        }
+
+        // `HANDLER` はプロセスで一度だけ設定できる。
+        let handler = HookHandler::new(
+            Hotkey {
+                vk: VK_RMENU,
+                right_alt: true,
+            },
+            Box::new(|| {
+                PRESSES.fetch_add(1, Ordering::SeqCst);
+            }),
+            Box::new(|| {
+                RELEASES.fetch_add(1, Ordering::SeqCst);
+            }),
+            Box::new(|| {}),
+        );
+        let _ = HANDLER.set(handler);
+        set_hotkey(Hotkey {
+            vk: VK_RMENU,
+            right_alt: true,
+        });
+
+        let mut keyboard: KBDLLHOOKSTRUCT = unsafe { std::mem::zeroed() };
+        keyboard.vkCode = u32::from(VK_RMENU);
+
+        // 合成入力は無視する。
+        keyboard.flags = LLKHF_INJECTED;
+        dispatch(&keyboard, WM_KEYDOWN);
+        dispatch(&keyboard, WM_KEYUP);
+        assert_eq!(PRESSES.load(Ordering::SeqCst), 0);
+        assert_eq!(RELEASES.load(Ordering::SeqCst), 0);
+
+        // 物理入力と同じフラグ構成なら従来どおり反応する (対照実験)。
+        keyboard.flags = 0;
+        dispatch(&keyboard, WM_KEYDOWN);
+        assert_eq!(PRESSES.load(Ordering::SeqCst), 1);
+        dispatch(&keyboard, WM_KEYUP);
+        assert_eq!(RELEASES.load(Ordering::SeqCst), 1);
+    }
+
+    /// 所有者ウィンドウ経由でクリップボードへ書き込み、読み戻せることを
+    /// 確認する。`OpenClipboard(NULL)` のままでは `SetClipboardData` が
+    /// 失敗するため、このテストがその退行を検出する。
+    ///
+    /// 実行するとクリップボードを一時的に書き換える。終了時に元のテキスト
+    /// (テキストが無ければ空文字列) へ戻す。
+    #[test]
+    fn writes_clipboard_with_owner_window() {
+        let original = clipboard_get();
+        let marker = format!("BAREVoiceJP clipboard test {}", std::process::id());
+        clipboard_set(&marker).expect("クリップボードへ書き込めること");
+        assert_eq!(
+            clipboard_get().expect("クリップボードを読み取れること"),
+            marker
+        );
+        let original = original.unwrap_or_default();
+        if let Err(exc) = clipboard_set(&original) {
+            eprintln!("クリップボードを復元できません: {exc}");
+        }
+    }
 }

@@ -53,6 +53,32 @@ function dotRow(value, max) {
   return html + "</span>";
 }
 
+// 数値を桁区切りで表示する。
+function formatCount(value) {
+  const count = Math.max(0, Math.round(Number(value) || 0));
+  return count.toLocaleString("ja-JP");
+}
+
+// 200 文字/分で換算した削減時間を読みやすい単位にする。
+function savedTimeLabel(minutes) {
+  const value = Number(minutes) || 0;
+  if (value <= 0) return "まだ実績はありません";
+  if (value < 60) return `約 ${Math.max(1, Math.round(value))} 分のタイピング削減`;
+  return `約 ${(value / 60).toFixed(1)} 時間のタイピング削減`;
+}
+
+// 累積文字数・発話回数・当日分・削減時間を表示する。
+function renderStats() {
+  if (!state) return;
+  const stats = state.stats || {};
+  const totalChars = Number(stats.totalChars) || 0;
+  $("#statTotalChars").textContent = formatCount(totalChars);
+  $("#statTotalChars").title = `総音声入力: ${formatCount(totalChars)} 文字`;
+  $("#statSessions").textContent = `${formatCount(stats.totalSessions)} 回`;
+  $("#statTodayChars").textContent = formatCount(stats.todayChars);
+  $("#statSaved").textContent = savedTimeLabel(stats.estimatedSavedMinutes);
+}
+
 function icon(name) {
   const icons = {
     model: '<path d="m12 3 9 5-9 5-9-5 9-5Z"/><path d="m3 13 9 5 9-5"/>',
@@ -134,21 +160,27 @@ function renderModels() {
       const selected = model.id === state.settings.model;
       const active = model.installed && selected;
       const download = model.download || {};
-      const busy = download.phase === "downloading" || download.phase === "extracting";
+      const busy = download.phase === "downloading"
+        || download.phase === "verifying"
+        || download.phase === "extracting";
       const percent = download.total > 0
         ? Math.min(100, (download.downloaded / download.total) * 100)
         : 0;
+      const barPercent = download.phase === "downloading" ? percent : 100;
+      const phaseLabel = download.phase === "verifying"
+        ? "検証中…"
+        : download.phase === "extracting" ? "展開中…" : Math.round(percent) + "%";
       let action = "";
       if (busy) {
-        action = `<span class="size">${download.phase === "extracting" ? "展開中…" : Math.round(percent) + "%"}</span>`;
+        action = `<span class="size">${phaseLabel}</span>`;
       } else if (model.installed) {
         action = `<button class="btn danger icon" data-delete="${esc(model.id)}" ${active ? "disabled" : ""} title="ストレージを解放">${icon("trash")}</button>`;
       } else {
         action = `<button class="btn primary" data-download="${esc(model.id)}">${icon("download")}ダウンロード</button>`;
       }
       const progress = busy
-        ? `<div class="progress"><i style="width:${download.phase === "extracting" ? 100 : percent}%"></i></div>
-           <div class="progress-note"><span>${download.phase === "extracting" ? "アーカイブを展開しています" : "ダウンロード中"}</span><span>${Math.round(percent)}%</span></div>`
+        ? `<div class="progress"><i style="width:${barPercent}%"></i></div>
+           <div class="progress-note"><span>${download.phase === "extracting" ? "アーカイブを展開しています" : download.phase === "verifying" ? "SHA-256 を検証しています" : "ダウンロード中"}</span><span>${Math.round(percent)}%</span></div>`
         : "";
       const failed = download.phase === "failed" && download.error
         ? `<div class="progress-note" style="color:#be123c"><span>${esc(download.error)}</span></div>`
@@ -269,17 +301,21 @@ function renderControls() {
   const paths = state.paths || {};
   $("#dictPaths").innerHTML = `<b>words.txt</b> ${esc(paths.words || "")}<br><b>config.toml</b> ${esc(paths.config || "")}`;
   $("#aboutPaths").innerHTML = `<b>設定</b> ${esc(paths.config || "")}<br><b>モデル</b> ${esc(paths.models || "")}<br><b>単語辞書</b> ${esc(paths.words || "")}`;
+  const sourceLine = paths.modelSource
+    ? `<b>配布元</b> <span title="${esc(paths.modelSource)}">${esc(paths.modelSource)}</span>`
+    : `<b>配布元</b> <span style="color:#be123c">未設定（config.toml の model_base_url）</span>`;
   $("#modelPaths").innerHTML = paths.models
-    ? `<b>ダウンロード先</b> <span title="${esc(paths.models)}">${esc(paths.models)}</span>`
-    : "";
+    ? `<b>ダウンロード先</b> <span title="${esc(paths.models)}">${esc(paths.models)}</span><br>${sourceLine}`
+    : sourceLine;
   $("#configPath").textContent = paths.config || "";
-  $("#version").textContent = `v${state.version || "0.1.1"}`;
+  $("#version").textContent = `v${state.version || "0.1.2"}`;
 }
 
 // 受信した状態を各セクションへ反映する。
 function render() {
   if (!state) return;
   setStatus();
+  renderStats();
   renderControls();
   renderModels();
   renderDevices();

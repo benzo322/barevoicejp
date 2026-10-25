@@ -76,5 +76,26 @@
   {"category": "natural_ja", "input": "コーヒーを一杯ください", "expected": "コーヒーを一杯ください"},
   {"category": "natural_ja", "input": "ドッキリする", "expected": "ドッキリする"},
   {"category": "natural_ja", "input": "ドッグフードを買う", "expected": "ドッグフードを買う"},
-  {"category": "natural_ja", "input": "船がドック入りする", "expected": "船がドック入りする"}
+  {"category": "natural_ja", "input": "船がドック入りする", "expected": "船がドック入りする"},
+
+  {"category": "exact_guard", "input": "モニターを確認する", "expected": "モニターを確認する"},
+  {"category": "exact_guard", "input": "コンピューターを使う", "expected": "コンピューターを使う"},
+  {"category": "exact_guard", "input": "センターに問い合わせる", "expected": "センターに問い合わせる"},
+  {"category": "exact_guard", "input": "パラメーターを変更する", "expected": "パラメーターを変更する"},
+  {"category": "exact_guard", "input": "コアラを見た", "expected": "コアラを見た"},
+  {"category": "exact_guard", "input": "シームレスに移行する", "expected": "シームレスに移行する"},
+  {"category": "exact_guard", "input": "リバースプロキシを置く", "expected": "リバースプロキシを置く"},
+  {"category": "exact_guard", "input": "オークションに出す", "expected": "オークションに出す"},
+  {"category": "exact_guard", "input": "サステナブルな設計", "expected": "サステナブルな設計"},
+  {"category": "exact_guard", "input": "ペガサスを見た", "expected": "ペガサスを見た"},
+  {"category": "exact_guard", "input": "ソックスを履く", "expected": "ソックスを履く"},
+  {"category": "exact_guard", "input": "モニターとキーボードを接続する", "expected": "モニターとキーボードを接続する"},
+
+  {"category": "short_word_boundary", "input": "ターを展開する", "expected": "tar を展開する"},
+  {"category": "short_word_boundary", "input": "コアを確認する", "expected": "Koa を確認する"},
+  {"category": "short_word_boundary", "input": "ろぐを確認する", "expected": "Log を確認する"},
+  {"category": "short_word_boundary", "input": "このろぐを見る", "expected": "この Log を見る"},
+  {"category": "short_word_boundary", "input": "すどで実行する", "expected": "sudo で実行する"},
+  {"category": "short_word_boundary", "input": "えらーが起きる", "expected": "Error が起きる"},
+  {"category": "short_word_boundary", "input": "きゅーに積む", "expected": "Queue に積む"}
 ]

@@ -393,18 +393,13 @@ impl Engine {
         let (model, tokens) = resolve_sensevoice_files(&dir)?;
         crate::info!("SenseVoice モデル読み込み: {}", model.display());
 
-        let hotwords = config.hotwords_file();
-        if let Some(hotwords_path) = hotwords.as_deref() {
-            match create_sense_voice(config, &model, &tokens, Some(hotwords_path)) {
-                Ok(recognizer) => return Ok(Self::finish(recognizer, config, true)),
-                Err(exc) => crate::warn!(
-                    "ホットワードの読み込みに失敗しました。\
-                     ホットワードなしで初期化します: {exc}"
-                ),
-            }
+        // SenseVoice は greedy_search 固定。sherpa-onnx は hotwords_file を
+        // modified_beam_search と組み合わせた場合しか受け付けず、greedy_search
+        // では初期化を拒否して NULL を返す。ホットワードは渡さない。
+        if config.has_hotwords_file() {
+            crate::debug!("hotwords.txt は SenseVoice (greedy_search) では使用しません");
         }
-
-        let recognizer = create_sense_voice(config, &model, &tokens, None).map_err(|exc| {
+        let recognizer = create_sense_voice(config, &model, &tokens).map_err(|exc| {
             format!(
                 "SenseVoice モデルの初期化に失敗しました: {}\n\
                  \x20 provider={} / num_threads={}\n\
@@ -521,7 +516,7 @@ fn resolve_sensevoice_files(dir: &Path) -> Result<(PathBuf, PathBuf), String> {
         return Err(format!(
             "SenseVoice モデルが見つかりません: {}\n\
              探したファイル: {names}\n\
-             次のいずれかで用意してください:\n{SENSEVOICE_DOWNLOAD_HINT}\
+             次のいずれかで用意してください:\n{MODEL_DOWNLOAD_HINT}\
              または --model-dir /path/to/model-dir を指定してください。",
             base.display()
         ));
@@ -568,7 +563,7 @@ fn resolve_reazonspeech_files(dir: &Path) -> Result<(PathBuf, PathBuf, PathBuf, 
         return Err(format!(
             "ReazonSpeech モデルが見つかりません: {}\n\
              不足ファイル: {}\n\
-             次のコマンドで用意してください:\n{REAZONSPEECH_DOWNLOAD_HINT}\
+             次のいずれかで用意してください:\n{MODEL_DOWNLOAD_HINT}\
              または --model-dir /path/to/model-dir を指定してください。",
             base.display(),
             missing.join(", ")
@@ -591,7 +586,7 @@ fn resolve_whisper_files(dir: &Path) -> Result<(PathBuf, PathBuf, PathBuf), Stri
     if !base.is_dir() {
         return Err(format!(
             "Whisper モデルディレクトリが見つかりません: {}\n\
-             次のコマンドで用意してください:\n{WHISPER_DOWNLOAD_HINT}\
+             次のいずれかで用意してください:\n{MODEL_DOWNLOAD_HINT}\
              または --model-dir /path/to/model-dir を指定してください。",
             base.display()
         ));
@@ -615,7 +610,7 @@ fn resolve_whisper_files(dir: &Path) -> Result<(PathBuf, PathBuf, PathBuf), Stri
         return Err(format!(
             "Whisper モデルが見つかりません: {}\n\
              不足ファイル: {}\n\
-             次のコマンドで用意してください:\n{WHISPER_DOWNLOAD_HINT}\
+             次のいずれかで用意してください:\n{MODEL_DOWNLOAD_HINT}\
              または --model-dir /path/to/model-dir を指定してください。",
             base.display(),
             missing.join(", ")
@@ -686,24 +681,10 @@ fn find_whisper_tokens(dir: &Path) -> Option<PathBuf> {
     candidates.into_iter().next()
 }
 
-const SENSEVOICE_DOWNLOAD_HINT: &str = "\
-  mkdir -p models && cd models\n\
-  curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2\n\
-  tar xf sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2\n";
-
-const REAZONSPEECH_DOWNLOAD_HINT: &str = "\
-  mkdir -p models && cd models\n\
-  curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2\n\
-  tar xf sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2\n";
-
-const WHISPER_DOWNLOAD_HINT: &str = "\
-  mkdir -p models && cd models\n\
-  curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-base.tar.bz2\n\
-  tar xf sherpa-onnx-whisper-base.tar.bz2\n\
-  curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-small.tar.bz2\n\
-  tar xf sherpa-onnx-whisper-small.tar.bz2\n\
-  curl -LO https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-whisper-large-v3-turbo.tar.bz2\n\
-  tar xf sherpa-onnx-whisper-large-v3-turbo.tar.bz2\n";
+/// モデル未配置時の案内。外部 URL は示さず、社内配布元の設定を促す。
+const MODEL_DOWNLOAD_HINT: &str = "\
+  設定画面の「モデル」タブからダウンロードしてください。\n\
+  配布元は exe と同じディレクトリの config.toml の model_base_url で指定します。\n";
 
 fn path_string(path: &Path) -> Result<CString, String> {
     CString::new(path.to_string_lossy().as_bytes())
@@ -733,17 +714,11 @@ fn empty_config(config: &Config) -> SherpaOnnxOfflineRecognizerConfig {
 ///
 /// 設定内の `CString` は呼び出し中だけ生かせばよい。C API は初期化時に
 /// 文字列を内部へコピーする。
-fn create_sense_voice(
-    config: &Config,
-    model: &Path,
-    tokens: &Path,
-    hotwords: Option<&Path>,
-) -> Result<Recognizer, String> {
+fn create_sense_voice(config: &Config, model: &Path, tokens: &Path) -> Result<Recognizer, String> {
     let model = path_string(model)?;
     let tokens = path_string(tokens)?;
     let provider = text_string(&config.provider)?;
     let language = text_string(&config.language)?;
-    let hotwords_file = hotwords.map(path_string).transpose()?;
 
     let mut cfg = empty_config(config);
     cfg.model_config.tokens = tokens.as_ptr();
@@ -755,10 +730,6 @@ fn create_sense_voice(
     };
     let decoding = text_string("greedy_search")?;
     cfg.decoding_method = decoding.as_ptr();
-    if let Some(hotwords) = &hotwords_file {
-        cfg.hotwords_file = hotwords.as_ptr();
-        cfg.hotwords_score = config.hotwords_score;
-    }
 
     // SAFETY: cfg のポインタはすべて生存中の CString を指している。
     let recognizer = unsafe { SherpaOnnxCreateOfflineRecognizer(&cfg) };
@@ -895,8 +866,10 @@ mod tests {
 
     #[test]
     fn resolves_whisper_files_prefers_int8_and_prefixed_tokens() {
-        let dir =
-            std::env::temp_dir().join(format!("BAREVoiceJP-whisper-resolve-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "BAREVoiceJP-whisper-resolve-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("一時ディレクトリ作成");
         for name in [

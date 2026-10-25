@@ -31,6 +31,15 @@ PR : ピーアール
 DB : ディービー
 ";
 
+/// 完全一致キーを境界判定する最小長。
+///
+/// これ未満 (2〜3 文字) の短い読みは、同種の仮名が連続する語の一部に
+/// だけ現れる場合に一致させない (例: 「モニター」の「ター」)。助詞が
+/// 続く場合は語の切れ目として扱う (例: 「ろぐを」「すどで」)。
+/// 4 文字以上は語として十分に特定的なので、複合語
+/// (「ドッカーコンテナ」) を壊さないよう部分一致を許す。
+const EXACT_BOUNDARY_MIN_CHARS: usize = FUZZY_MIN_CHARS;
+
 const PARTICLES: [char; 9] = ['で', 'に', 'を', 'は', 'が', 'の', 'と', 'へ', 'も'];
 
 /// words.txt の 1 行分。
@@ -374,8 +383,8 @@ pub(crate) struct TextFormatter {
     remove_ja_spaces: bool,
     fuzzy: bool,
     fuzzy_threshold: f64,
-    /// 長いキー順 (安定ソート)。
-    replacements: Vec<(String, String)>,
+    /// 長いキー順 (安定ソート)。1 回スキャンで比較するため文字単位で持つ。
+    exact: Vec<(Vec<char>, String)>,
     /// 読みが長い順 (安定ソート)。
     fuzzy_entries: Vec<WordEntry>,
 }
@@ -431,9 +440,12 @@ impl TextFormatter {
 
         let mut order: Vec<usize> = (0..exact.len()).collect();
         order.sort_by_key(|&index| std::cmp::Reverse(char_len(&exact[index].0)));
-        let replacements = order
+        let exact: Vec<(Vec<char>, String)> = order
             .into_iter()
-            .map(|index| exact[index].clone())
+            .map(|index| {
+                let (key, target) = &exact[index];
+                (key.chars().collect(), target.clone())
+            })
             .collect();
 
         fuzzy_entries.sort_by_key(|entry| {
@@ -445,7 +457,7 @@ impl TextFormatter {
             remove_ja_spaces,
             fuzzy,
             fuzzy_threshold: threshold,
-            replacements,
+            exact,
             fuzzy_entries,
         }
     }
@@ -466,12 +478,7 @@ impl TextFormatter {
             text = remove_ja_spaces(&text);
         }
         // 完全一致を先に適用し、登録済みの読みがファジー一致に奪われないようにする。
-        for (key, target) in &self.replacements {
-            // 含まれないキーでは文字列を作り直さない。
-            if text.contains(key) {
-                text = replace_all_with_boundaries(&text, key, target);
-            }
-        }
+        text = self.apply_exact(&text);
         if self.fuzzy
             && let Some(replaced) = self.apply_fuzzy(&text)
         {
@@ -479,6 +486,45 @@ impl TextFormatter {
         }
         text = normalize_ascii_japanese_boundaries(&text);
         text.trim().to_string()
+    }
+
+    /// 完全一致キーを原文の 1 回スキャンで置換する。
+    ///
+    /// 各位置で最長のキーを選び、置換後の文字列は再走査しない。
+    /// 短いキーは [`is_exact_key_boundary`] を通した場合だけ一致する。
+    fn apply_exact(&self, text: &str) -> String {
+        if self.exact.is_empty() {
+            return text.to_string();
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let mut out = String::with_capacity(text.len() + 16);
+        let mut index = 0;
+        while index < chars.len() {
+            let mut matched: Option<(&[char], &str)> = None;
+            for (key, target) in &self.exact {
+                // 先頭文字で大半のキーを捨てる。
+                if key[0] != chars[index] || index + key.len() > chars.len() {
+                    continue;
+                }
+                let end = index + key.len();
+                if chars[index..end] == key[..] && is_exact_key_boundary(&chars, index, end) {
+                    matched = Some((key, target.as_str()));
+                    break;
+                }
+            }
+            match matched {
+                Some((key, target)) => {
+                    let end = index + key.len();
+                    out.push_str(&with_boundary_spaces(&chars, index, end, target));
+                    index = end;
+                }
+                None => {
+                    out.push(chars[index]);
+                    index += 1;
+                }
+            }
+        }
+        out
     }
 
     /// ファジー一致で置換した文字列を返す。置換が無ければ `None`。
@@ -661,33 +707,95 @@ fn with_boundary_spaces(text: &[char], start: usize, end: usize, replacement: &s
     out
 }
 
-/// 文字単位で全出現を置換し、英日境界の空白を補う。
-fn replace_all_with_boundaries(text: &str, key: &str, target: &str) -> String {
-    if key.is_empty() {
-        return text.to_string();
+/// 完全一致キーが語の境界に置かれているか。
+///
+/// 英数字のキーは前後が英数字でないこと、短い仮名キーは同種の仮名が
+/// 連続する語の一部でないことを要求する。助詞 (「ろぐを」「すどで」) は
+/// 語の切れ目として扱う。
+fn is_exact_key_boundary(text: &[char], start: usize, end: usize) -> bool {
+    let first = text[start];
+    let last = text[end - 1];
+    if first.is_ascii_alphanumeric() && start > 0 && text[start - 1].is_ascii_alphanumeric() {
+        return false;
     }
-    let chars: Vec<char> = text.chars().collect();
-    let key_chars: Vec<char> = key.chars().collect();
-    let mut out = String::with_capacity(text.len() + 16);
-    let mut index = 0;
-    let mut last = 0;
-    while index + key_chars.len() <= chars.len() {
-        if chars[index..index + key_chars.len()] == key_chars[..] {
-            out.extend(&chars[last..index]);
-            out.push_str(&with_boundary_spaces(
-                &chars,
-                index,
-                index + key_chars.len(),
-                target,
-            ));
-            index += key_chars.len();
-            last = index;
-        } else {
-            index += 1;
+    if last.is_ascii_alphanumeric() && end < text.len() && text[end].is_ascii_alphanumeric() {
+        return false;
+    }
+    if end - start >= EXACT_BOUNDARY_MIN_CHARS {
+        return true;
+    }
+    let Some(script) = kana_script(first) else {
+        return true;
+    };
+    // 「モニター」の「ター」のように、より長い同種仮名語の途中に
+    // だけ現れる短いキーは一致させない。助詞が続く場合は語の切れ目。
+    if start > 0
+        && kana_script(text[start - 1]) == Some(script)
+        && !ends_with_boundary_particle(text, start)
+    {
+        return false;
+    }
+    if end < text.len()
+        && kana_script(text[end]) == Some(script)
+        && !starts_with_boundary_particle(text, end)
+    {
+        return false;
+    }
+    true
+}
+
+/// 境界として扱う助詞。単独で語に付くものを長い順に並べる。
+const BOUNDARY_PARTICLES: &[&str] = &[
+    "について",
+    "に対して",
+    "として",
+    "によって",
+    "ばかり",
+    "から",
+    "まで",
+    "より",
+    "だけ",
+    "など",
+    "でも",
+    "しか",
+    "ほど",
+    "って",
+    "で",
+    "に",
+    "を",
+    "は",
+    "が",
+    "の",
+    "と",
+    "へ",
+    "も",
+];
+
+/// `text[start..]` が助詞で始まるか。
+fn starts_with_boundary_particle(text: &[char], start: usize) -> bool {
+    BOUNDARY_PARTICLES
+        .iter()
+        .any(|particle| char_starts_with(text, start, particle))
+}
+
+/// `text[..end]` が助詞で終わるか。
+fn ends_with_boundary_particle(text: &[char], end: usize) -> bool {
+    BOUNDARY_PARTICLES.iter().any(|particle| {
+        let length = particle.chars().count();
+        end >= length && char_starts_with(text, end - length, particle)
+    })
+}
+
+/// 文字スライスの `start` 位置が `prefix` で始まるか。
+fn char_starts_with(text: &[char], start: usize, prefix: &str) -> bool {
+    let mut index = start;
+    for expected in prefix.chars() {
+        if text.get(index) != Some(&expected) {
+            return false;
         }
+        index += 1;
     }
-    out.extend(&chars[last..]);
-    out
+    true
 }
 
 /// `<|...|>` 形式のモデルタグを除去する。
@@ -854,6 +962,65 @@ mod tests {
         );
         assert_eq!(f.format("</s><unk> テスト"), "テスト");
         assert_eq!(f.format(""), "");
+    }
+
+    #[test]
+    fn short_exact_keys_need_word_boundaries() {
+        let words = vec![
+            WordEntry {
+                target: "tar".to_string(),
+                reading: Some("ター".to_string()),
+            },
+            WordEntry {
+                target: "Koa".to_string(),
+                reading: Some("コア".to_string()),
+            },
+            WordEntry {
+                target: "Loki".to_string(),
+                reading: Some("ロキ".to_string()),
+            },
+            WordEntry {
+                target: "Sass".to_string(),
+                reading: Some("サス".to_string()),
+            },
+            WordEntry {
+                target: "Docker".to_string(),
+                reading: Some("ドッカー".to_string()),
+            },
+            WordEntry {
+                target: "log".to_string(),
+                reading: Some("ろぐ".to_string()),
+            },
+            WordEntry {
+                target: "AI".to_string(),
+                reading: Some("あい".to_string()),
+            },
+        ];
+        let f = TextFormatter::new(&[], &words, 80.0, false, true, true);
+
+        // より長いカタカナ語の一部には一致しない。
+        assert_eq!(f.format("モニターを確認する"), "モニターを確認する");
+        assert_eq!(f.format("コンピューターを使う"), "コンピューターを使う");
+        assert_eq!(f.format("センターに問い合わせる"), "センターに問い合わせる");
+        assert_eq!(f.format("パラメーターを変更する"), "パラメーターを変更する");
+        assert_eq!(f.format("コアラを見た"), "コアラを見た");
+        assert_eq!(f.format("リバースプロキシを置く"), "リバースプロキシを置く");
+        assert_eq!(f.format("サステナブルな設計"), "サステナブルな設計");
+        assert_eq!(f.format("ペガサス"), "ペガサス");
+
+        // 語として独立していれば従来どおり置換する。
+        assert_eq!(f.format("ターを展開する"), "tar を展開する");
+        assert_eq!(f.format("コアを確認する"), "Koa を確認する");
+        // 4 文字以上のキーは複合語でも置換する。
+        assert_eq!(f.format("ドッカーコンテナ"), "Docker コンテナ");
+        // 置換結果を再走査しない。
+        assert_eq!(f.format("ターとドッカー"), "tar と Docker");
+
+        // 短いひらがな読みは助詞が続けば置換し、長い語の途中では置換しない。
+        assert_eq!(f.format("ろぐを確認する"), "log を確認する");
+        assert_eq!(f.format("このろぐを見る"), "この log を見る");
+        assert_eq!(f.format("あいさつをする"), "あいさつをする");
+        assert_eq!(f.format("あい"), "AI");
     }
 
     #[test]

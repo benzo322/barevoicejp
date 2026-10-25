@@ -1,3 +1,7 @@
+// リリースビルドはコンソールを持たない GUI サブシステムとしてリンクし、
+// 起動時の黒いウィンドウを出さない。ログは logs/app.log へ出力する。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! Windows 向け Push-to-Talk 音声入力。
 //!
 //! 右 Alt を押している間だけ録音し、離した瞬間に SenseVoice で推論して
@@ -14,6 +18,7 @@ mod models;
 mod overlay;
 mod sound;
 mod state;
+mod stats;
 mod text;
 mod tray;
 mod ui;
@@ -40,13 +45,16 @@ fn main() {
     }
     cli.resolve_paths();
     logging::init(cli.debug);
-    if !cli.console {
+    // リリースビルドは GUI サブシステムでコンソールを持たない。
+    // デバッグビルドだけ従来どおり --console 指定時に表示する。
+    if cfg!(debug_assertions) && !cli.console {
         win::hide_console();
     }
     config::use_data_root();
 
     if cli.sweep && cli.eval.is_none() {
         eprintln!("--sweep は --eval <JSON> と一緒に指定してください");
+        logging::flush();
         std::process::exit(2);
     }
 
@@ -58,14 +66,37 @@ fn main() {
         warn!("設定ファイルのホットキーが不正です。alt_r を使います: {exc}");
         config.hotkey = "alt_r".to_string();
     }
+    if config.model_base_url.trim().is_empty() {
+        info!("モデル配布元: 未設定 (config.toml の model_base_url)");
+    } else {
+        info!(
+            "モデル配布元: {}",
+            config::redact_source(&config.model_base_url)
+        );
+    }
 
     if let Some(path) = &cli.eval {
-        std::process::exit(eval::run(path, cli.sweep, &config));
+        let code = eval::run(path, cli.sweep, &config);
+        logging::flush();
+        std::process::exit(code);
     }
 
     if cli.list_devices {
-        std::process::exit(audio::list_input_devices());
+        let code = audio::list_input_devices();
+        logging::flush();
+        std::process::exit(code);
     }
+
+    // 二重起動を防ぐ。2 個目が動くとキーボードフックとクリップボードを
+    // 奪い合い、同じ発話が二重に貼り付いたり設定が競合したりする。
+    let _instance = match win::SingleInstance::acquire() {
+        Ok(instance) => instance,
+        Err(exc) => {
+            warn!("{exc}。二重起動を中止します");
+            logging::flush();
+            std::process::exit(0);
+        }
+    };
 
     info!(
         "BAREVoiceJP / プラットフォーム: Windows / ホットキー={} / 貼り付け={}+{}",
@@ -128,6 +159,7 @@ fn main() {
         Ok(app) => app,
         Err(exc) => {
             error!("{exc}");
+            logging::flush();
             std::process::exit(1);
         }
     };

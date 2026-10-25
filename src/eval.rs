@@ -16,6 +16,13 @@ use crate::text::{self, TextFormatter, WordEntry};
 /// スイープで比較するファジーしきい値 (%)。
 const SWEEP_THRESHOLDS: [f64; 4] = [70.0, 75.0, 80.0, 85.0];
 
+/// 完全一致モードでのみ評価するケースのカテゴリ。
+///
+/// ファジー一致は「似た語を置換する」機能なので、一般語が別の製品名へ
+/// 寄せられることがある (例: 「コンピューター」→ Composer)。このカテゴリは
+/// ファジー有効時の評価対象から外す。
+const EXACT_ONLY_CATEGORY: &str = "exact_guard";
+
 /// 評価対象の 1 ケース。
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct EvalCase {
@@ -92,25 +99,22 @@ pub(crate) fn run(path: &Path, sweep: bool, config: &Config) -> i32 {
         .cloned()
         .collect();
 
-    // ファジー無効時は fuzzy_variant ケースを評価対象から外す。
+    // ファジー無効時は fuzzy_variant、有効時は完全一致専用のケースを外す。
     // --sweep はしきい値比較のためファジーを強制する。
     let fuzzy = config.fuzzy || sweep;
-    let skipped = if fuzzy {
-        0
+    let skip_category = if fuzzy {
+        EXACT_ONLY_CATEGORY
     } else {
-        cases
-            .iter()
-            .filter(|case| case.category == "fuzzy_variant")
-            .count()
+        "fuzzy_variant"
     };
-    let cases: Vec<EvalCase> = if fuzzy {
-        cases
-    } else {
-        cases
-            .into_iter()
-            .filter(|case| case.category != "fuzzy_variant")
-            .collect()
-    };
+    let skipped = cases
+        .iter()
+        .filter(|case| case.category == skip_category)
+        .count();
+    let cases: Vec<EvalCase> = cases
+        .into_iter()
+        .filter(|case| case.category != skip_category)
+        .collect();
 
     let formatter = build_formatter(config, &replacements, &words, config.fuzzy_threshold, fuzzy);
     let outcomes = evaluate(&cases, &formatter);
@@ -118,7 +122,11 @@ pub(crate) fn run(path: &Path, sweep: bool, config: &Config) -> i32 {
     println!("=== テキスト整形 評価 ===");
     println!("ケース: {}", path.display());
     if skipped > 0 {
-        println!("スキップ: fuzzy_variant {skipped} 件 (--fuzzy で有効)");
+        if fuzzy {
+            println!("スキップ: {EXACT_ONLY_CATEGORY} {skipped} 件 (完全一致専用)");
+        } else {
+            println!("スキップ: fuzzy_variant {skipped} 件 (--fuzzy で有効)");
+        }
     }
     print_report(config.fuzzy_threshold, &outcomes);
 
@@ -412,8 +420,8 @@ mod tests {
         assert_eq!(percentage(1, 2), 50.0);
     }
 
-    #[test]
-    fn committed_cases_pass_with_fuzzy() {
+    /// コミット済みケースを指定モードで評価し、失敗だけ返す。
+    fn committed_failures(fuzzy: bool) -> Vec<Outcome> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let cases =
             load_cases(&root.join("tests/text_cases.json")).expect("評価ケースを読み込める");
@@ -426,12 +434,34 @@ mod tests {
             .chain(external.iter())
             .cloned()
             .collect();
-        let formatter =
-            build_formatter(&config, &replacements, &words, config.fuzzy_threshold, true);
-        let failures: Vec<Outcome> = evaluate(&cases, &formatter)
+        let formatter = build_formatter(
+            &config,
+            &replacements,
+            &words,
+            config.fuzzy_threshold,
+            fuzzy,
+        );
+        let skip_category = if fuzzy {
+            EXACT_ONLY_CATEGORY
+        } else {
+            "fuzzy_variant"
+        };
+        evaluate(&cases, &formatter)
             .into_iter()
+            .filter(|outcome| outcome.case.category != skip_category)
             .filter(|outcome| !outcome.pass)
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn committed_cases_pass_without_fuzzy() {
+        let failures = committed_failures(false);
+        assert!(failures.is_empty(), "完全一致モードで失敗: {failures:?}");
+    }
+
+    #[test]
+    fn committed_cases_pass_with_fuzzy() {
+        let failures = committed_failures(true);
         assert!(failures.is_empty(), "ファジー有効時に失敗: {failures:?}");
     }
 }

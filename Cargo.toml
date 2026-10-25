@@ -1,6 +1,6 @@
 [package]
 name = "BAREVoiceJP"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "超低遅延 Push-to-Talk 音声入力 (SenseVoice / sherpa-onnx)"
 
@@ -12,6 +12,7 @@ bzip2 = "0.6"
 cpal = "0.16"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
 strsim = "0.11"
 tao = "0.37"
 tar = "0.4"

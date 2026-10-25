@@ -25,6 +25,7 @@ use crate::config::{self, MODEL_IDS, Settings, SoundTheme};
 use crate::models;
 use crate::overlay::Overlay;
 use crate::sound;
+use crate::stats::Stats;
 use crate::text;
 use crate::tray;
 use crate::win;
@@ -39,6 +40,16 @@ pub(crate) enum UiEvent {
     Tick,
     ModelsChanged,
     Quit,
+}
+
+/// WebView が読み込んでよい URL か。
+///
+/// 設定画面とオンボーディングは `with_html` で埋め込んだ静的ページだけを
+/// 表示する。WebView2 の `NavigateToString` は文書 URL を `about:blank` に
+/// するため、そこから派生するフラグメントだけを許可する。`data:` や任意の
+/// `about:` を許可すると、そのページが IPC (`window.ipc`) を叩ける状態になる。
+fn is_builtin_page(url: &str) -> bool {
+    url.is_empty() || url == "about:blank" || url.starts_with("about:blank#")
 }
 
 /// 設定画面に一度だけ表示する通知。
@@ -94,7 +105,16 @@ pub(crate) fn run(mut app: App) -> ! {
         .with_initialization_script(script)
         .with_background_color((243, 247, 252, 255))
         .with_devtools(cfg!(debug_assertions))
+        .with_navigation_handler(|url| is_builtin_page(&url))
+        .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
+        .with_permission_handler(|_| wry::PermissionResponse::Deny)
         .with_ipc_handler(move |request| {
+            // 組み込みページ (about:blank) 以外からの IPC は受け付けない。
+            let source = request.uri().to_string();
+            if !is_builtin_page(&source) {
+                crate::warn!("組み込みページ以外からの IPC を拒否しました: {source}");
+                return;
+            }
             let _ = ipc_proxy.send_event(UiEvent::Ipc(request.body().clone()));
         })
         .build(&window)
@@ -327,7 +347,15 @@ fn build_onboarding(
         .with_html(include_str!("web/onboarding.html"))
         .with_background_color((247, 250, 255, 255))
         .with_devtools(cfg!(debug_assertions))
+        .with_navigation_handler(|url| is_builtin_page(&url))
+        .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
+        .with_permission_handler(|_| wry::PermissionResponse::Deny)
         .with_ipc_handler(move |request| {
+            let source = request.uri().to_string();
+            if !is_builtin_page(&source) {
+                crate::warn!("組み込みページ以外からの IPC を拒否しました: {source}");
+                return;
+            }
             let Ok(value) = serde_json::from_str::<Value>(request.body()) else {
                 return;
             };
@@ -393,12 +421,13 @@ fn handle_ipc(
             let state = models::download_state(id);
             if matches!(
                 state.phase,
-                models::Phase::Downloading | models::Phase::Extracting
+                models::Phase::Downloading | models::Phase::Verifying | models::Phase::Extracting
             ) {
                 return;
             }
             let proxy = proxy.clone();
-            models::download(id, move || {
+            let base_url = app.shared().snapshot().model_base_url;
+            models::download(id, &base_url, move || {
                 let _ = proxy.send_event(UiEvent::ModelsChanged);
             });
             set_notice(notice, notice_id, "info", "ダウンロードを開始しました");
@@ -478,7 +507,7 @@ fn save_settings(
     notice: &mut Option<Notice>,
     notice_id: &mut u64,
 ) {
-    let Ok(next) = serde_json::from_value::<Settings>(value) else {
+    let Ok(mut next) = serde_json::from_value::<Settings>(value) else {
         set_notice(notice, notice_id, "error", "設定の形式が不正です");
         return;
     };
@@ -496,6 +525,9 @@ fn save_settings(
 
     let previous = settings.clone();
     let mut config = app.shared().snapshot();
+    // `model_base_url` はレンダラーへ渡していないため、保存要求には含まれない。
+    // 空文字で上書きせず、現在の実行時設定を維持する。
+    next.model_base_url.clone_from(&config.model_base_url);
     next.apply_to(&mut config);
     let mut applied = Settings::from_config_with_first_run(&config, next.first_run);
 
@@ -539,7 +571,17 @@ fn save_settings(
 }
 
 fn open_in_notepad(path: &str, notice: &mut Option<Notice>, notice_id: &mut u64) {
-    match std::process::Command::new("notepad.exe").arg(path).spawn() {
+    // PATH やカレントディレクトリの探索順に依存せず、Windows 標準の
+    // notepad.exe を明示的に起動する。
+    let notepad = std::env::var_os("SystemRoot")
+        .map(|root| {
+            std::path::PathBuf::from(root)
+                .join("System32")
+                .join("notepad.exe")
+        })
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| std::path::PathBuf::from("notepad.exe"));
+    match std::process::Command::new(notepad).arg(path).spawn() {
         Ok(_) => {}
         Err(exc) => set_notice(
             notice,
@@ -606,6 +648,7 @@ fn snapshot(app: &App, settings: &Settings, notice: &Option<Notice>) -> Value {
                     "phase": match download.phase {
                         models::Phase::Idle => "idle",
                         models::Phase::Downloading => "downloading",
+                        models::Phase::Verifying => "verifying",
                         models::Phase::Extracting => "extracting",
                         models::Phase::Done => "done",
                         models::Phase::Failed => "failed",
@@ -643,23 +686,26 @@ fn snapshot(app: &App, settings: &Settings, notice: &Option<Notice>) -> Value {
         .map(|dir| {
             json!({
                 "words": dir.join(text::WORDS_PATH).display().to_string(),
-                "replacements": dir.join(text::REPLACEMENTS_PATH).display().to_string(),
                 "config": dir.join(config::CONFIG_PATH).display().to_string(),
                 "models": config::models_root().display().to_string(),
+                "modelSource": config::redact_source(&config.model_base_url),
             })
         })
-        .unwrap_or_else(|_| json!({}));
+        .unwrap_or_else(
+            |_| json!({ "modelSource": config::redact_source(&config.model_base_url) }),
+        );
 
     json!({
-        "settings": settings,
+        "settings": settings_for_ui(settings),
         "engine": {
             "ready": engine_ready,
             "building": engine_building,
             "error": engine_error,
             "model": config.model,
-            "hotwords": config.hotwords_file().is_some(),
+            "hotwords": config.has_hotwords_file(),
         },
         "models": model_list,
+        "stats": stats_for_ui(&shared.stats()),
         "defaultDevice": default_device,
         "devices": devices,
         "words": words,
@@ -682,4 +728,105 @@ fn snapshot(app: &App, settings: &Settings, notice: &Option<Notice>) -> Value {
             "message": notice.message,
         })),
     })
+}
+
+/// 累積実績の UI DTO。
+///
+/// 本文・音声・日付は渡さず、表示に必要な数値だけを含める。
+fn stats_for_ui(stats: &Stats) -> Value {
+    json!({
+        "totalChars": stats.total_chars,
+        "totalSessions": stats.total_sessions,
+        "todayChars": stats.today_chars,
+        "estimatedSavedMinutes": stats.estimated_saved_minutes(),
+    })
+}
+
+/// 設定画面へ渡す設定 DTO。
+///
+/// `model_base_url` は認証情報を含み得るため、レンダラーへは渡さない。
+/// 画面からは編集できない値なので、保存時に現在の実行時設定を維持する。
+fn settings_for_ui(settings: &Settings) -> Value {
+    json!({
+        "first_run": settings.first_run,
+        "model": &settings.model,
+        "hotkey": &settings.hotkey,
+        "autostart": settings.autostart,
+        "device": &settings.device,
+        "language": &settings.language,
+        "num_threads": settings.num_threads,
+        "sound_start": settings.sound_start,
+        "sound_finish": settings.sound_finish,
+        "sound_volume": settings.sound_volume,
+        "sound_theme": &settings.sound_theme,
+        "floating_bar": settings.floating_bar,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allows_only_embedded_pages() {
+        for url in ["", "about:blank", "about:blank#models"] {
+            assert!(is_builtin_page(url), "{url} を拒否した");
+        }
+        for url in [
+            "about:config",
+            "data:text/html,<script>alert(1)</script>",
+            "https://example.com/",
+            "file:///C:/Windows/System32/calc.exe",
+        ] {
+            assert!(!is_builtin_page(url), "{url} を許可した");
+        }
+    }
+
+    #[test]
+    fn stats_dto_exposes_only_numeric_metrics() {
+        let stats = Stats {
+            total_chars: 12_340,
+            total_sessions: 7,
+            today_chars: 120,
+            today_date: "2026-10-25".to_string(),
+        };
+        let dto = stats_for_ui(&stats);
+        assert_eq!(dto["totalChars"], 12_340);
+        assert_eq!(dto["totalSessions"], 7);
+        assert_eq!(dto["todayChars"], 120);
+        let minutes = dto["estimatedSavedMinutes"].as_f64().expect("数値");
+        assert!((minutes - 61.7).abs() < 0.01, "{minutes}");
+        // 本文・日付などの追加情報を WebView へ渡していない。
+        let object = dto.as_object().expect("オブジェクト");
+        assert_eq!(object.len(), 4);
+        assert!(object.values().all(serde_json::Value::is_number));
+    }
+
+    #[test]
+    fn settings_dto_roundtrips_without_losing_values() {
+        let original = Settings {
+            first_run: false,
+            model: "whisper-small".to_string(),
+            hotkey: "ctrl_r".to_string(),
+            autostart: true,
+            device: Some("3".to_string()),
+            language: "ja".to_string(),
+            num_threads: 4,
+            sound_start: false,
+            sound_finish: true,
+            sound_volume: 0.39,
+            sound_theme: "chime".to_string(),
+            floating_bar: false,
+            model_base_url: "https://models.example/?sig=secret".to_string(),
+        };
+        let dto = settings_for_ui(&original);
+        let text = dto.to_string();
+        assert!(!text.contains("sig=secret"), "{text}");
+        assert!(!text.contains("model_base_url"), "{text}");
+        let mut parsed: Settings = serde_json::from_value(dto).expect("DTO を復元できる");
+        assert_eq!(parsed.model_base_url, "", "DTO に配布元は含まれない");
+        // 画面からは編集しない値なので、保存時に現在値を維持する。
+        parsed.model_base_url.clone_from(&original.model_base_url);
+        assert_eq!(parsed, original);
+    }
 }

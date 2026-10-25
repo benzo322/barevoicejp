@@ -16,6 +16,7 @@ use crate::engine::Engine;
 use crate::state::{
     AppState, HybridRelease, HybridState, PressOutcome, ReleaseOutcome, StateMachine, VisualState,
 };
+use crate::stats::{self, Stats};
 use crate::text::{self, TextFormatter, WordEntry};
 use crate::win;
 use crate::{debug, error, info, sound, warn};
@@ -32,6 +33,8 @@ struct Utterance {
     start_sample: u64,
     end_sample: u64,
     released_at: Instant,
+    /// 録音終了時に前面だったウィンドウ。推論中に切り替わったら貼り付けない。
+    target: usize,
 }
 
 /// 短い押下のあと、2回目の押下を待っている状態。
@@ -48,6 +51,10 @@ enum Job {
     Utterance(Utterance),
     /// 設定変更を反映してエンジンを再初期化する。
     Reconfigure,
+    /// 辞書ファイルの更新を確認する。
+    ///
+    /// フックコールバックからファイル I/O を追い出すための非同期通知。
+    CheckDictionaries,
     /// ワーカーを終了する。
     Shutdown,
 }
@@ -96,6 +103,8 @@ pub(crate) struct Shared {
     visual: Arc<AtomicU8>,
     hybrid: Mutex<HybridState>,
     pending_tap: Mutex<Option<PendingTap>>,
+    /// 累積文字数・発話回数。本文は保持しない。
+    stats: Mutex<Stats>,
 }
 
 impl Shared {
@@ -154,6 +163,7 @@ impl Shared {
             visual: Arc::new(AtomicU8::new(VisualState::Idle as u8)),
             hybrid: Mutex::new(HybridState::default()),
             pending_tap: Mutex::new(None),
+            stats: Mutex::new(Stats::load(Path::new(stats::STATS_PATH))),
         })
     }
 
@@ -250,6 +260,37 @@ impl Shared {
             .collect()
     }
 
+    /// 設定画面へ渡す累積実績。
+    ///
+    /// 日付をまたいで最初に読まれた時点で当日分を 0 に戻す。保存は次の
+    /// 貼り付け成功時に行うため、ここではファイル I/O をしない。
+    pub(crate) fn stats(&self) -> Stats {
+        let today = stats::local_date();
+        let mut current = lock(&self.stats);
+        if current.roll_day(&today) {
+            debug!("統計の当日分をリセットしました: {today}");
+        }
+        current.clone()
+    }
+
+    /// 貼り付けに成功した 1 発話を加算し、`stats.json` へ保存する。
+    ///
+    /// 保存に失敗してもメモリ上の値は進め、次の成功時に再試行する。
+    fn record_paste(&self, chars: u64) {
+        if chars == 0 {
+            return;
+        }
+        let today = stats::local_date();
+        let snapshot = {
+            let mut current = lock(&self.stats);
+            current.record(chars, &today);
+            current.clone()
+        };
+        if let Err(exc) = snapshot.save(Path::new(stats::STATS_PATH)) {
+            warn!("累積実績を保存できません: {exc}");
+        }
+    }
+
     /// 状態機械に合わせて表示状態を揃える。
     fn settle_visual(&self) {
         let state = lock(&self.state).state();
@@ -261,10 +302,12 @@ impl Shared {
         });
     }
 
-    /// ホットキー押下。辞書を更新し、長押し/2回押しを判定して録音を始める。
+    /// ホットキー押下。辞書の更新をワーカーへ通知し、長押し/2回押しを
+    /// 判定して録音を始める。
     fn on_press(&self) {
-        // 録音開始前に設定・辞書の変更を確認する。
-        self.reload_if_changed();
+        // ファイル I/O はフックコールバック内で行わない。ここでは
+        // ワーカーへ通知するだけで、読み込みは別スレッドが担う。
+        self.request_dictionary_check();
 
         let now = Instant::now();
         self.poll_hybrid_at(now);
@@ -402,6 +445,7 @@ impl Shared {
                     start_sample,
                     end_sample,
                     released_at: now,
+                    target: win::foreground_window(),
                 });
                 if self.tx.send(job).is_err() {
                     warn!("推論ワーカーが停止しています");
@@ -482,8 +526,20 @@ impl Shared {
         if current.hotwords != mtimes.hotwords {
             mtimes.hotwords = text::file_mtime_ns(Path::new(text::HOTWORDS_PATH));
             let count = text::count_hotwords(Path::new(text::HOTWORDS_PATH));
-            info!("ホットリロード: ホットワードを再読み込み ({}単語)", count);
-            self.request_reconfigure();
+            info!(
+                "ホットリロード: hotwords.txt を検出しましたが、\
+                 現行エンジンは未対応のため反映しません ({count}単語)"
+            );
+        }
+    }
+
+    /// 辞書ファイルの更新確認をワーカーへ通知する。
+    ///
+    /// ホットキーのフックコールバックから呼ばれるため、ここでは送信だけを
+    /// 行い、ファイルの読み込みはワーカーへ委ねる。
+    fn request_dictionary_check(&self) {
+        if self.tx.send(Job::CheckDictionaries).is_err() {
+            debug!("辞書の更新確認を通知できません (ワーカー停止)");
         }
     }
 
@@ -644,6 +700,7 @@ impl App {
             let _ = worker.join();
         }
         info!("終了します...");
+        crate::logging::flush();
     }
 
     /// キーボードフックを設置し、設定画面のイベントループへ入る。
@@ -695,6 +752,7 @@ fn worker_loop(shared: Arc<Shared>, mut engine: Option<Engine>, rx: Receiver<Job
                 let config = shared.snapshot();
                 engine = shared.set_engine_result(Engine::build(&config));
             }
+            Job::CheckDictionaries => shared.reload_if_changed(),
             Job::Utterance(item) => match engine.as_ref() {
                 Some(engine) => process(engine, &shared, &item),
                 None => {
@@ -767,7 +825,8 @@ fn process(engine: &Engine, shared: &Shared, item: &Utterance) {
         audio.len() as f64 / config.sample_rate as f64,
         rms
     );
-    debug!("生の認識結果: {raw_text:?}");
+    // 認識結果そのものはログへ残さない (音声内容の漏えいを防ぐ)。
+    debug!("生の認識結果: {} 文字", raw_text.chars().count());
 
     let formatted = lock(&shared.formatter).format(&raw_text);
     if formatted.is_empty() {
@@ -776,13 +835,18 @@ fn process(engine: &Engine, shared: &Shared, item: &Utterance) {
         shared.settle_visual();
         return;
     }
-    info!("認識結果: {formatted}");
+    let chars = stats::char_count(&formatted);
+    info!("認識結果: {chars} 文字 (本文はログに残しません)");
 
     lock(&shared.state).begin_pasting();
     shared.settle_visual();
-    let pasted = paste(&config, &formatted, item.released_at);
+    let pasted = paste(&config, &formatted, item.released_at, item.target);
     lock(&shared.state).finish_pasting();
     shared.settle_visual();
+    if pasted {
+        // 貼り付けが成立した発話だけを実績に数える。
+        shared.record_paste(chars);
+    }
     if pasted && config.sound_finish {
         sound::play(config.sound_theme, sound::Cue::Finish, config.sound_volume);
     }
@@ -791,7 +855,7 @@ fn process(engine: &Engine, shared: &Shared, item: &Utterance) {
 /// クリップボードへ格納し、Ctrl+V を 1 回送る。
 ///
 /// `restore_clipboard` が有効なら貼り付け後に元の内容へ戻す。
-fn paste(config: &Config, text: &str, released_at: Instant) -> bool {
+fn paste(config: &Config, text: &str, released_at: Instant, target: usize) -> bool {
     let original = if config.restore_clipboard {
         match win::clipboard_get() {
             Ok(original) => Some(original),
@@ -806,10 +870,26 @@ fn paste(config: &Config, text: &str, released_at: Instant) -> bool {
 
     if let Err(exc) = win::clipboard_set(text) {
         error!("クリップボードへ書き込めません: {exc}");
+        // 書き込みに失敗したときは、退避した元の内容を戻す。
+        if let Some(original) = original.as_deref()
+            && let Err(exc) = win::clipboard_set(original)
+        {
+            warn!("退避したクリップボードを復元できません: {exc}");
+        }
         return false;
     }
 
+    // 推論中にユーザーが別のウィンドウへ切り替えた場合、そのまま Ctrl+V を
+    // 送ると意図しないアプリへ文章を注入してしまう。録音終了時の前面
+    // ウィンドウが変わっていたら送信せず、クリップボードにだけ残す。
     thread::sleep(Duration::from_millis(config.paste_delay_ms as u64));
+    if win::foreground_window() != target {
+        warn!(
+            "貼り付け先のウィンドウが変わったため Ctrl+V を送りません\
+             （認識結果はクリップボードに残しました）"
+        );
+        return false;
+    }
     let paste_ok = match win::send_ctrl_v() {
         Ok(()) => {
             info!(

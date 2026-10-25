@@ -79,36 +79,13 @@ pub(crate) const MS_PER_SECOND: u64 = 1_000;
 /// 浮動小数で扱うミリ秒換算。
 pub(crate) const MS_PER_SECOND_F64: f64 = MS_PER_SECOND as f64;
 
-/// `models/` のルートを探す。
+/// `models/` のルート。常に実行ファイルの隣を使う。
 ///
-/// リファレンスはスクリプトと同じディレクトリの `models/` を使う。
-/// Rust 版は exe の隣 → カレントディレクトリの順に実在するものを採用し、
-/// 開発ビルド (`cargo run`) だけはマニフェスト位置を最優先する。
-/// どこにも無ければ exe の隣 (無ければカレントディレクトリ) を使う。
-///
-/// `CARGO_MANIFEST_DIR` はビルドしたマシンの絶対パスがバイナリへ焼き込まれる。
-/// 配布ビルドで参照すると、インストール先の exe ではなくビルド元の
-/// `models/` (= `config.toml` を含むデータルート) を拾ってしまうため、
-/// リリースビルドでは候補に含めない。
+/// カレントディレクトリはショートカットの「開始位置」、共有フォルダ、
+/// System32 など起動元によって変わるため、参照すると辞書・設定・モデルの
+/// 読み込み先が起動文脈で入れ替わってしまう。
+/// `--model-dir` のような明示指定は `Config::model_dir_for` が別途扱う。
 pub(crate) fn models_root() -> PathBuf {
-    let mut candidates: Vec<PathBuf> = Vec::with_capacity(3);
-    #[cfg(debug_assertions)]
-    if let Some(manifest) = option_env!("CARGO_MANIFEST_DIR") {
-        candidates.push(PathBuf::from(manifest).join("models"));
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        candidates.push(dir.join("models"));
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("models"));
-    }
-    if let Some(found) = candidates.into_iter().find(|path| path.exists()) {
-        return found;
-    }
-    // どこにも無ければ exe の隣に作る。自動起動時もカレントディレクトリに
-    // 依存せず、モデル・辞書・設定を同じ場所へ置ける。
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
@@ -132,6 +109,29 @@ pub(crate) fn use_data_root() {
             "データディレクトリへ移動できません ({}): {exc}",
             root.display()
         );
+    }
+}
+
+/// ログ表示用に URL の認証情報を伏せる。
+///
+/// `https://user:pass@host/path` のような配布元をそのままログへ出すと
+/// 認証情報が `logs/app.log` に残るため、userinfo を伏せ、クエリ・
+/// フラグメント (SAS トークン等) は落とす。スキームの大小文字や
+/// 区切りの誤り (スラッシュ 1 本、バックスラッシュ) にも依存せず、
+/// `@` より前の認証情報らしき区間を必ずマスクする。
+pub(crate) fn redact_source(value: &str) -> String {
+    let value = value.trim();
+    // クエリ・フラグメントには SAS トークン等が入り得るため落とす。
+    let head = value.split(['?', '#']).next().unwrap_or_default();
+    match head.rfind('@') {
+        Some(at) => {
+            // `user:pass@` の開始位置まで戻る。区切りが無ければ先頭から。
+            let start = head[..at]
+                .rfind(['/', '\\', ' ', '\t'])
+                .map_or(0, |index| index + 1);
+            format!("{}***@{}", &head[..start], &head[at + 1..])
+        }
+        None => head.to_string(),
     }
 }
 
@@ -194,7 +194,10 @@ pub(crate) struct Config {
     pub(crate) provider: String,
     pub(crate) language: String,
     pub(crate) use_itn: bool,
+    /// ホットワード対応エンジン向けのスコア。現行エンジンでは未使用。
     pub(crate) hotwords_score: f32,
+    /// モデル配布元。`https://...` または `\\server\share\...`。
+    pub(crate) model_base_url: String,
 
     // --- 録音 / ホットキー ---
     /// 押している間だけ録音するキー名 (`alt_r`, `f9`, `ctrl_r` など)。
@@ -258,6 +261,7 @@ impl Default for Config {
             language: "ja".to_string(),
             use_itn: true,
             hotwords_score: 2.0,
+            model_base_url: String::new(),
 
             hotkey: "alt_r".to_string(),
             paste_modifier: "ctrl".to_string(),
@@ -312,10 +316,11 @@ fn default_replacements() -> Vec<(String, String)> {
 }
 
 impl Config {
-    /// hotwords.txt が存在する場合のみ推論エンジンへ渡す。
-    pub(crate) fn hotwords_file(&self) -> Option<PathBuf> {
-        let path = PathBuf::from(crate::text::HOTWORDS_PATH);
-        path.is_file().then_some(path)
+    /// UI 表示用。`hotwords.txt` が存在するか。
+    ///
+    /// 現行エンジンはいずれもホットワード非対応のため、推論器へは渡さない。
+    pub(crate) fn has_hotwords_file(&self) -> bool {
+        Path::new(crate::text::HOTWORDS_PATH).is_file()
     }
 
     /// 選択中のモデルに対応するディレクトリを返す。
@@ -359,6 +364,9 @@ pub(crate) struct Settings {
     pub(crate) sound_volume: f32,
     pub(crate) sound_theme: String,
     pub(crate) floating_bar: bool,
+    /// モデル配布元。空ならダウンロード不可（外部への既定アクセスは行わない）。
+    #[serde(default)]
+    pub(crate) model_base_url: String,
 }
 
 impl Default for Settings {
@@ -375,9 +383,13 @@ impl Settings {
             Ok(text) => match toml::from_str(&text) {
                 Ok(settings) => (settings, true),
                 Err(exc) => {
+                    // `toml` の Display は問題行のソース断片を含むため、
+                    // 資格情報が混ざり得る `model_base_url` の行をログへ
+                    // 複製しないよう、メッセージ本文だけを記録する。
                     crate::warn!(
-                        "設定ファイルを解釈できません ({}): {exc}。既定値で起動します。",
-                        path.display()
+                        "設定ファイルを解釈できません ({}): {}。既定値で起動します。",
+                        path.display(),
+                        exc.message()
                     );
                     (Self::default(), true)
                 }
@@ -394,11 +406,22 @@ impl Settings {
     }
 
     /// 設定を TOML として保存する。
+    ///
+    /// 書き込み途中のクラッシュや電源断で既存の設定が壊れないよう、
+    /// 同じディレクトリの一時ファイルへ書いてから置き換える。
     pub(crate) fn save(&self, path: &Path) -> Result<(), String> {
         let text = toml::to_string_pretty(self)
             .map_err(|exc| format!("設定を TOML に変換できません: {exc}"))?;
-        fs::write(path, text)
-            .map_err(|exc| format!("設定を保存できません ({}): {exc}", path.display()))
+        let temp = path.with_extension("toml.tmp");
+        if let Err(exc) = fs::write(&temp, text) {
+            let _ = fs::remove_file(&temp);
+            return Err(format!("設定を保存できません ({}): {exc}", temp.display()));
+        }
+        if let Err(exc) = fs::rename(&temp, path) {
+            let _ = fs::remove_file(&temp);
+            return Err(format!("設定を保存できません ({}): {exc}", path.display()));
+        }
+        Ok(())
     }
 
     /// UI 設定を実行時 [`Config`] へ反映する。
@@ -422,6 +445,7 @@ impl Settings {
         config.sound_volume = self.sound_volume.clamp(0.0, 1.0);
         config.sound_theme = SoundTheme::parse(&self.sound_theme);
         config.floating_bar = self.floating_bar;
+        config.model_base_url = self.model_base_url.trim().to_string();
     }
 
     /// 実行時 [`Config`] から保存用の設定を作る。
@@ -448,6 +472,7 @@ impl Settings {
             sound_volume: config.sound_volume,
             sound_theme: config.sound_theme.as_str().to_string(),
             floating_bar: config.floating_bar,
+            model_base_url: config.model_base_url.clone(),
         }
     }
 }
@@ -507,7 +532,7 @@ SenseVoice / ReazonSpeech / Whisper を使う Push-to-Talk 音声入力 (Windows
                              Whisper は ja 固定
   --num-threads N            CPU 推論スレッド数 (既定: 2)
   --provider NAME            ONNX Runtime provider (既定: cpu)
-  --hotwords-score F         ホットワードスコア (既定: 2.0)
+  --hotwords-score F         ホットワードスコア (現行エンジンは未対応)
   --highpass / --no-highpass 80Hz ハイパスフィルタ (既定: OFF)
   --denoise / --no-denoise   RNNoise ノイズリダクション (既定: OFF)
   --pre-roll-ms MS           押下直前の音声を含める長さ (既定: 200)
@@ -521,8 +546,9 @@ SenseVoice / ReazonSpeech / Whisper を使う Push-to-Talk 音声入力 (Windows
   --eval FILE                テキスト整形の評価ケース JSON を実行して終了
                              音声キャプチャと ASR は初期化しない
   --sweep                    --eval 時にファジーしきい値 70/75/80/85 を比較
-  --debug                    デバッグログを表示
-  --console                  コンソールを表示したまま起動 (既定: 非表示)
+  --debug                    デバッグログを出力 (logs/app.log にも記録)
+  --console                  デバッグビルドでコンソールを表示したまま起動
+                             (リリースビルドは GUI サブシステムで常に非表示)
 ";
 
 impl Cli {
@@ -671,7 +697,7 @@ impl Config {
             self.language = value.clone();
         }
         if let Some(value) = cli.num_threads {
-            self.num_threads = value;
+            self.num_threads = value.clamp(1, 16);
         }
         if let Some(value) = &cli.provider {
             self.provider = value.clone();
@@ -712,6 +738,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn clamps_cli_thread_count() {
+        let mut config = Config::default();
+        config.apply_cli(
+            &parse_args(["--num-threads".to_string(), "999".to_string()]).expect("args"),
+        );
+        assert_eq!(config.num_threads, 16);
+        config
+            .apply_cli(&parse_args(["--num-threads".to_string(), "0".to_string()]).expect("args"));
+        assert_eq!(config.num_threads, 1);
+    }
+
+    #[test]
+    fn redacts_credentials_in_logged_source() {
+        assert_eq!(
+            redact_source("https://user:pass@models.example.co.jp/models"),
+            "https://***@models.example.co.jp/models"
+        );
+        assert_eq!(
+            redact_source("https://models.example.co.jp/models"),
+            "https://models.example.co.jp/models"
+        );
+        assert_eq!(redact_source(r"\\fileserver\share"), r"\\fileserver\share");
+    }
+
+    #[test]
+    fn saves_settings_atomically() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("時刻")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "barevoicejp-config-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("一時ディレクトリ");
+        let path = dir.join("config.toml");
+
+        let settings = Settings {
+            first_run: false,
+            model: "whisper-base".to_string(),
+            ..Settings::default()
+        };
+        settings.save(&path).expect("保存");
+
+        assert!(path.is_file());
+        assert!(!dir.join("config.toml.tmp").exists());
+        let (loaded, existed) = Settings::load(&path);
+        assert!(existed);
+        assert_eq!(loaded, settings);
+        fs::remove_dir_all(dir).expect("後片付け");
+    }
+
+    #[test]
     fn fuzzy_is_off_by_default_and_enabled_by_flag() {
         let mut config = Config::default();
         assert!(!config.fuzzy);
@@ -744,11 +823,16 @@ mod tests {
         settings.sound_theme = "chime".to_string();
         settings.sound_volume = 2.0;
         settings.num_threads = 99;
+        settings.model_base_url = "https://models.example.co.jp/barevoice".to_string();
         settings.apply_to(&mut config);
         assert_eq!(config.model, "whisper-small");
         assert_eq!(config.sound_theme, SoundTheme::Chime);
         assert!((config.sound_volume - 1.0).abs() < f32::EPSILON);
         assert_eq!(config.num_threads, 16);
+        assert_eq!(
+            config.model_base_url,
+            "https://models.example.co.jp/barevoice"
+        );
 
         let text = toml::to_string_pretty(&settings).expect("TOML へ変換");
         let parsed: Settings = toml::from_str(&text).expect("TOML から復元");
@@ -772,10 +856,61 @@ mod tests {
     }
 
     #[test]
+    fn parses_unc_model_base_url() {
+        let settings: Settings =
+            toml::from_str("model_base_url = '\\\\fileserver\\share\\BAREVoiceJP\\models'\n")
+                .expect("UNC パス");
+        assert_eq!(
+            settings.model_base_url,
+            r"\\fileserver\share\BAREVoiceJP\models"
+        );
+    }
+
+    #[test]
+    fn redacts_credentials_and_query_from_sources() {
+        assert_eq!(
+            redact_source("https://user:pass@models.example.co.jp/barevoice?sv=2024&sig=secret"),
+            "https://***@models.example.co.jp/barevoice"
+        );
+        assert_eq!(
+            redact_source("https://models.example.co.jp/barevoice/?sig=secret#frag"),
+            "https://models.example.co.jp/barevoice/"
+        );
+        assert_eq!(
+            redact_source(r"\\fileserver\share\BAREVoiceJP\models"),
+            r"\\fileserver\share\BAREVoiceJP\models"
+        );
+    }
+
+    #[test]
+    fn redacts_credentials_even_for_malformed_sources() {
+        // 大文字スキーム・スラッシュ欠落・バックスラッシュ区切りでも伏せる。
+        for source in [
+            "HTTPS://svc:s3cret@models.corp/barevoice?sv=1&sig=TOKEN",
+            "https:/svc:s3cret@models.corp/barevoice",
+            r"https:\\svc:s3cret@models.corp\barevoice",
+            "HTTPS://svc:s3cret@models.corp",
+        ] {
+            let redacted = redact_source(source);
+            assert!(!redacted.contains("s3cret"), "漏れている: {redacted}");
+            assert!(!redacted.contains("TOKEN"), "トークンが残る: {redacted}");
+            assert!(redacted.contains("***@models.corp"), "{redacted}");
+        }
+    }
+
+    #[test]
+    fn models_root_lives_next_to_the_executable() {
+        let exe = std::env::current_exe().expect("実行ファイル");
+        let dir = exe.parent().expect("実行ファイルのディレクトリ");
+        assert_eq!(models_root(), dir.join("models"));
+    }
+
+    #[test]
     fn settings_defaults_fill_missing_keys() {
         let settings: Settings = toml::from_str("hotkey = \"f9\"\n").expect("部分的な設定");
         assert_eq!(settings.hotkey, "f9");
         assert_eq!(settings.model, "sensevoice");
+        assert_eq!(settings.model_base_url, "");
         assert!(settings.floating_bar);
         assert!(settings.first_run);
     }
