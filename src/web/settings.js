@@ -9,6 +9,7 @@ let lastNotice = 0;
 let hotkeyCapture = false;
 let lastModels = "";
 let lastWords = "";
+let lastHistory = "";
 let level = 0;
 let tab = "control";
 
@@ -85,6 +86,7 @@ function icon(name) {
     download: '<path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/>',
     trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="m6 6 1 15h10l1-15"/>',
     check: '<path d="M20 6 9 17l-5-5"/>',
+    copy: '<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
     close: '<path d="M6 6l12 12M18 6 6 18"/>',
     spin: '<path d="M12 3a9 9 0 1 0 9 9"/>'
   };
@@ -281,6 +283,31 @@ function renderWords() {
     </div>`).join("");
 }
 
+// 認識履歴を新しい順に描画する。
+function renderHistory() {
+  if (!state) return;
+  const history = state.history || [];
+  const signature = JSON.stringify(history);
+  if (signature === lastHistory) return;
+  lastHistory = signature;
+  $("#clearHistory").disabled = !history.length;
+  if (!history.length) {
+    $("#historyList").innerHTML = `<div class="empty">まだ履歴がありません。<br>音声入力を確定すると、ここに直近10件が表示されます。</div>`;
+    return;
+  }
+  $("#historyList").innerHTML = history.map((entry, index) => `
+    <div class="history-row">
+      <div class="history-main">
+        <p class="history-text">${esc(entry.text)}</p>
+        <div class="history-meta">
+          <span>${esc(entry.time)}</span>
+          <span class="history-model">${esc(entry.model)}</span>
+        </div>
+      </div>
+      <button class="btn icon history-copy" data-copy-history="${index}" title="クリップボードへコピー" aria-label="コピー">${icon("copy")}</button>
+    </div>`).join("");
+}
+
 // トグル・音量・辞書パスなどのコントロールを同期する。
 function renderControls() {
   if (!state) return;
@@ -303,12 +330,12 @@ function renderControls() {
   $("#aboutPaths").innerHTML = `<b>設定</b> ${esc(paths.config || "")}<br><b>モデル</b> ${esc(paths.models || "")}<br><b>単語辞書</b> ${esc(paths.words || "")}`;
   const sourceLine = paths.modelSource
     ? `<b>配布元</b> <span title="${esc(paths.modelSource)}">${esc(paths.modelSource)}</span>`
-    : `<b>配布元</b> <span>公式リリース（GitHub）</span>`;
+    : `<b>配布元</b> <span>公式配布元（sherpa-onnx GitHub / Hugging Face）</span>`;
   $("#modelPaths").innerHTML = paths.models
     ? `<b>ダウンロード先</b> <span title="${esc(paths.models)}">${esc(paths.models)}</span><br>${sourceLine}`
     : sourceLine;
   $("#configPath").textContent = paths.config || "";
-  $("#version").textContent = `v${state.version || "0.1.3"}`;
+  $("#version").textContent = `v${state.version || "0.1.4"}`;
 }
 
 // 受信した状態を各セクションへ反映する。
@@ -318,6 +345,7 @@ function render() {
   renderStats();
   renderControls();
   renderModels();
+  renderHistory();
   renderDevices();
   renderWords();
   if (state.notice && state.notice.id !== lastNotice) {
@@ -498,6 +526,24 @@ $("#wordList").addEventListener("click", event => {
     target: button.dataset.target,
     reading: button.dataset.reading || null
   });
+});
+
+$("#historyList").addEventListener("click", event => {
+  const button = event.target.closest("button[data-copy-history]");
+  if (!button) return;
+  const row = button.closest(".history-row");
+  const text = row && row.querySelector(".history-text")
+    ? row.querySelector(".history-text").textContent
+    : "";
+  if (!text) return;
+  ipc({ cmd: "copy_history", text });
+});
+
+$("#clearHistory").addEventListener("click", () => {
+  if (!state || !(state.history || []).length) return;
+  if (confirm("認識履歴をすべて削除しますか？")) {
+    ipc({ cmd: "clear_history" });
+  }
 });
 
 $("#modelGrid").addEventListener("click", event => {

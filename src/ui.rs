@@ -473,6 +473,19 @@ fn handle_ipc(
                 Err(exc) => set_notice(notice, notice_id, "error", &exc),
             }
         }
+        "copy_history" => {
+            let Some(text) = value.get("text").and_then(Value::as_str) else {
+                return;
+            };
+            match win::clipboard_set(text) {
+                Ok(()) => set_notice(notice, notice_id, "success", "履歴をコピーしました"),
+                Err(exc) => set_notice(notice, notice_id, "error", &exc),
+            }
+        }
+        "clear_history" => match app.shared().clear_history() {
+            Ok(()) => set_notice(notice, notice_id, "success", "履歴を全件削除しました"),
+            Err(exc) => set_notice(notice, notice_id, "error", &exc),
+        },
         "add_word" => {
             let target = value.get("target").and_then(Value::as_str).unwrap_or("");
             let reading = value.get("reading").and_then(Value::as_str).unwrap_or("");
@@ -687,6 +700,8 @@ fn snapshot(app: &App, settings: &Settings, notice: &Option<Notice>) -> Value {
         })
         .collect::<Vec<_>>();
 
+    let history = shared.history();
+
     let device_list = crate::audio::input_device_list();
     let default_device = device_list.default_name;
     let devices = device_list
@@ -709,7 +724,7 @@ fn snapshot(app: &App, settings: &Settings, notice: &Option<Notice>) -> Value {
         .collect::<Vec<_>>();
 
     let model_source = if config.model_base_url.trim().is_empty() {
-        models::OFFICIAL_RELEASE.to_string()
+        models::official_source_label().to_string()
     } else {
         config::redact_source(&config.model_base_url)
     };
@@ -734,6 +749,7 @@ fn snapshot(app: &App, settings: &Settings, notice: &Option<Notice>) -> Value {
             "hotwords": config.has_hotwords_file(),
         },
         "models": model_list,
+        "history": history,
         "stats": stats_for_ui(&shared.stats()),
         "defaultDevice": default_device,
         "devices": devices,

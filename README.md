@@ -13,14 +13,15 @@
 
 - **完全ローカル推論** — クラウドAPI・アカウント登録は不要
 - **押して話すだけ** — ホットキーは変更可能 (既定 `alt_r`)。200ms 未満の押下は誤操作として破棄
-- **5種類のモデル** — 初回起動のオンボーディングまたは設定画面から、sherpa-onnx 公式リリース (GitHub) より直接ダウンロード。社内サーバー / 共有フォルダの配布元へも切り替え可能 (アプリ本体には同梱しない)
+- **6種類のモデル** — 初回起動のオンボーディングまたは設定画面から、sherpa-onnx 公式リリース (GitHub) / Hugging Face より直接ダウンロード。社内サーバー / 共有フォルダの配布元へも切り替え可能 (アプリ本体には同梱しない)
 - **日本語向けテキスト整形** — タグ除去、空白正規化、辞書置換、英日境界のスペース補正、`SenseVoice` の ITN
 - **辞書のホットリロード** — `words.txt` / `replacements.json` は保存すると次回の発話から反映。`hotwords.txt` は監視のみ (現行エンジンは未対応)
-- **常駐UI** — トレイ常駐、設定画面 (操作 / モデル / マイク / 辞書 / 通知音 / ガイド / 技術スタック)、初回オンボーディング
+- **常駐UI** — トレイ常駐、設定画面 (操作 / モデル / マイク / 辞書 / 履歴 / 通知音 / ガイド / 技術スタック)、初回オンボーディング
 - **フローティングバー** — 録音レベルと状態を表示 (`tiny-skia` で描画)
 - **通知音** — 4テーマ (soft / pop / chime / subtle)、音量調整可
 - **クリップボード保護** — 貼り付け後に元のクリップボード内容を復元するオプション
 - **累積実績カウンター** — 総入力文字数・貼り付け回数・当日分と、推定タイピング削減時間を設定画面に表示。本文は保存しない
+- **認識履歴** — 確定したテキストを日時・モデル名とともに直近10件だけ `history.json` へ保存。設定画面からワンクリックでコピー・全件クリアできる
 - **自動起動** — `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` に登録
 
 ## 動作環境
@@ -30,7 +31,7 @@
 | OS | Windows 10 / 11 (x64) |
 | ランタイム | WebView2 Runtime (Windows 11 は標準搭載、Windows 10 は Evergreen 版が必要) |
 | マイク | 入力デバイスが1つ以上 |
-| ディスク | モデル用に 160 MB 〜 700 MB |
+| ディスク | モデル用に 160 MB 〜 2.5 GB |
 
 ## インストール
 
@@ -87,12 +88,13 @@ iscc installer.iss
 
 ### データの置き場所
 
-モデル・辞書・設定・ログはすべて **exe と同じディレクトリ** (`models/` の親) に置かれる。自動起動時もカレントディレクトリに依存しない。
+モデル・辞書・設定・履歴・ログはすべて **exe と同じディレクトリ** (`models/` の親) に置かれる。自動起動時もカレントディレクトリに依存しない。
 
 ```
 BAREVoiceJP.exe
 config.toml          # 設定 (UI が自動生成・保存)
 stats.json           # 累積実績 (文字数と発話回数のみ)
+history.json         # 認識履歴 (直近10件、本文を含む)
 words.txt            # 辞書 (正式表記 : 代表読み)
 replacements.json    # 完全一致置換 (かな → 英字)
 hotwords.txt         # ホットワード (現行エンジンは未対応)
@@ -119,8 +121,9 @@ logs/
 
 - 推論はローカルで完結し、音声・認識結果を外部サービスへ送信しない
 - 音声はメモリ上のリングバッファだけに保持し、ファイルへ書き出さない
-- `stats.json` に保存するのは文字数と貼り付け回数だけで、認識結果の本文は保存しない
-- 社内配布元を使う場合は `checksums.sha256` と照合してから展開する。公式リリース直取得は HTTPS と Content-Length で検証する（配布元にハッシュがないため）
+- `stats.json` に保存するのは文字数と貼り付け回数だけで、累積実績に認識結果の本文は保存しない
+- 認識結果の本文は `history.json` に直近10件だけ保存される。設定画面の「履歴」タブから全件クリアできる
+- 社内配布元を使う場合は `checksums.sha256` と照合してから展開・配置する。公式配布元直取得は HTTPS と Content-Length で検証し、Haas-ja は組み込みの SHA-256 でも検証する
 - リモートの配布元は HTTPS を必須とし、HTTPS → HTTP のリダイレクトも拒否する（平文 HTTP はループバック検証時のみ）
 - アーカイブの受信・展開サイズに上限を設け、圧縮爆弾によるディスク枯渇を防ぐ
 - 設定画面の WebView は埋め込みページ以外への遷移、新しいウィンドウ、権限要求を拒否する
@@ -136,15 +139,18 @@ logs/
 |---|---|---|---|---|---|
 | `sensevoice` | SenseVoice | 約 155 MB | 5 | 4 | 日英中韓広東語。既定・推奨 |
 | `reazonspeech` | ReazonSpeech | 約 680 MB | 4 | 5 | 日本語特化。長い発話に強い |
+| `haas-ja-v1.0` | Haas-ja-v1.0 | 約 2.5 GB | 3 | 5 | 日本語特化。高精度だが約 3 GB のメモリを使用 |
 | `whisper-base` | Whisper Base | 約 198 MB | 5 | 3 | 軽量・短いメモ向け |
 | `whisper-small` | Whisper Small | 約 610 MB | 3 | 4 | 速度と精度のバランス |
 | `whisper-turbo` | Whisper Turbo | 約 538 MB | 2 | 5 | 高精度。マシンパワーが必要 |
 
-モデル本体はアプリに同梱せず、初回起動後に設定画面の「モデル」タブからダウンロードする。既定では sherpa-onnx 公式リリース (GitHub) から直接取得する。`config.toml` の `model_base_url` を設定すると、社内サーバー（HTTPS または UNC 共有）からの配布に切り替えられる。Whisper は日本語 (`ja`) 固定、SenseVoice は `--language` で切り替えられる。
+モデル本体はアプリに同梱せず、初回起動後に設定画面の「モデル」タブからダウンロードする。既定では sherpa-onnx 公式リリース (GitHub) から直接取得し、`haas-ja-v1.0` のみ Hugging Face (`oboroge0/Haas-ja-v1.0-onnx`) から取得する。`config.toml` の `model_base_url` を設定すると、社内サーバー（HTTPS または UNC 共有）からの配布に切り替えられる。Whisper は日本語 (`ja`) 固定、SenseVoice は `--language` で切り替えられる。
+
+`haas-ja-v1.0` は ONNX Runtime の外部データを使うため、`encoder.onnx` と `encoder.data` を同じディレクトリに置く必要がある（設定画面からのダウンロードでは自動的に揃う）。
 
 ### 配布元の切り替え（社内サーバー / 共有フォルダ）
 
-既定の公式リリース直取得をやめ、社内サーバーや共有フォルダから配布する場合の設定。`model_base_url` を空に戻せば公式リリースへ戻る。
+既定の公式配布元直取得をやめ、社内サーバーや共有フォルダから配布する場合の設定。`model_base_url` を空に戻せば公式配布元へ戻る。
 
 #### 設定ファイルとキー
 
@@ -154,7 +160,7 @@ logs/
 %LOCALAPPDATA%\Programs\BAREVoiceJP\config.toml
 ```
 
-キーは **`model_base_url`** 1つ。空なら公式リリース (GitHub) から直接ダウンロードし、値を入れると社内配布元を使う。`config.toml` を開き、次の行を追加または変更する（アプリ再起動後に反映）。
+キーは **`model_base_url`** 1つ。空なら公式配布元 (sherpa-onnx GitHub / Hugging Face) から直接ダウンロードし、値を入れると社内配布元を使う。`config.toml` を開き、次の行を追加または変更する（アプリ再起動後に反映）。
 
 ```toml
 # HTTPS の社内 Web サーバー（末尾スラッシュは有無どちらでも可）
@@ -173,17 +179,17 @@ model_base_url = 'D:\BAREVoiceJP\models'
 
 | 指定 | 例 | 動作 |
 |---|---|---|
-| HTTPS | `https://host/barevoice/models` | `ureq` で取得。接続10秒・応答ヘッダ30秒・本文30分でタイムアウト |
+| HTTPS | `https://host/barevoice/models` | `ureq` で取得。接続10秒・応答ヘッダ30秒・本文2時間でタイムアウト |
 | HTTP (ループバックのみ) | `http://127.0.0.1:8765` | ローカル検証用。`127.0.0.1` / `localhost` / `[::1]` 以外の平文 HTTP は拒否される |
 | UNC | `\\fileserver\share\BAREVoiceJP\models` | 共有フォルダからストリームコピー |
 | 絶対パス | `D:\BAREVoiceJP\models` | ローカルフォルダからストリームコピー |
 | `file://` | `file:///C:/BAREVoiceJP/models` | 上記の絶対パスとして扱う |
 
-`model_base_url` が空の場合は、設定画面の「モデル」タブに公式リリース (GitHub) の URL が配布元として表示され、そこから直接ダウンロードする。社内配布元を指定した場合は、その URL / パスが表示される。
+`model_base_url` が空の場合は、設定画面の「モデル」タブに公式配布元 (sherpa-onnx GitHub / Hugging Face) の説明が表示され、そこから直接ダウンロードする。社内配布元を指定した場合は、その URL / パスが表示される。
 
 #### サーバー側の配置
 
-ベース URL/パスの直下に、**アーカイブ本体と `checksums.sha256`** を置く。
+ベース URL/パスの直下に、**アーカイブ本体または ONNX ファイル一式と `checksums.sha256`** を置く。
 
 ```
 <model_base_url>/
@@ -193,7 +199,14 @@ model_base_url = 'D:\BAREVoiceJP\models'
   sherpa-onnx-whisper-base.tar.bz2
   sherpa-onnx-whisper-small.tar.bz2
   sherpa-onnx-whisper-turbo.tar.bz2
+  encoder.onnx
+  encoder.data
+  decoder.onnx
+  joiner.onnx
+  tokens.txt
 ```
+
+`encoder.onnx` 〜 `tokens.txt` は `haas-ja-v1.0` 用。`encoder.onnx` と `encoder.data` は必ず同じディレクトリに置く。
 
 `checksums.sha256` は `sha256sum` 互換形式（`<64桁の16進>␠␠<ファイル名>`）。`#` 行と `*` 付きファイル名、`models/foo.tar.bz2` のようなパス表記も受け付ける。
 
@@ -201,6 +214,11 @@ model_base_url = 'D:\BAREVoiceJP\models'
 # BAREVoiceJP models
 7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e  sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
 911b2083efd7c0dca2ac3b358b75222660dc09fb716d64fbfc417ba6c99ff3de  sherpa-onnx-whisper-base.tar.bz2
+8e34e59e7a2dff1dbda2d91c4ba1d9673f976da74db25597883a185088300757  encoder.onnx
+7aa9d630b66a2317f615c7094c201ca1049d3b14b0a2515f42a8eea0c17e410a  encoder.data
+2947cb5512699cbba753fe45fe221428aadaa9856597debbb7aabe19cc253622  decoder.onnx
+8a68320e750890ff9e944a794b41ae1c42c6f439ac4c273503458a6b42adc12d  joiner.onnx
+ec78b13c5d9f156cf0d5fdbd6b5aec5785680f319c92630c11d5d11b14b83a84  tokens.txt
 ```
 
 生成例（PowerShell）:
@@ -209,12 +227,16 @@ model_base_url = 'D:\BAREVoiceJP\models'
 Get-ChildItem .\*.tar.bz2 | Get-FileHash -Algorithm SHA256 |
   ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
   Set-Content -Encoding ascii checksums.sha256
+Get-ChildItem .\encoder.onnx, .\encoder.data, .\decoder.onnx, .\joiner.onnx, .\tokens.txt |
+  Get-FileHash -Algorithm SHA256 |
+  ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
+  Add-Content -Encoding ascii checksums.sha256
 ```
 
 生成例（Linux / WSL）:
 
 ```bash
-sha256sum *.tar.bz2 > checksums.sha256
+sha256sum *.tar.bz2 encoder.onnx encoder.data decoder.onnx joiner.onnx tokens.txt > checksums.sha256
 ```
 
 **注意**: ハッシュは実際に配布するアーカイブのバイト列に対して計算する。再圧縮・再パッケージした場合は必ず再生成する。ハッシュは HTTPS または共有 ACL で保護された経路で取得する前提（マニフェスト自体の改ざん対策は経路の信頼に依存する）。
@@ -223,14 +245,14 @@ sha256sum *.tar.bz2 > checksums.sha256
 
 `model_base_url` を設定した場合の流れ:
 
-1. マニフェストを取得し、対象アーカイブの期待ハッシュを取得
+1. マニフェストを取得し、対象ファイルの期待ハッシュを取得
 2. `.part` へダウンロード/コピー（進捗を UI へ通知）
 3. **ローカルの `.part` ファイルを SHA-256 で検証**
-4. 一致した場合だけアーカイブを確定し、`models/` へ展開
+4. 一致した場合だけファイルを確定し、アーカイブは `models/` へ展開、直接配置モデルは `models/Haas-ja-v1.0-onnx/` へ移動
 5. 不一致なら `.part` を削除し、モデルカードに  
    `SHA-256 が一致しません。ダウンロードが不完全です。再ダウンロードしてください。` を表示
 
-進捗は `ダウンロード中 → 検証中 → 展開中 → DL済み` の順で表示される。公式リリース直取得ではハッシュがないため `検証中` を省き、`ダウンロード中 → 展開中 → DL済み` となる。接続失敗・タイムアウト時は `モデル配布元に接続できません。ネットワーク接続を確認してください: <URL>` を表示する。共有パスの場合は `社内サーバーの共有パスに接続できません` / `ファイルがありません` / `共有権限を確認してください` を表示する。
+進捗は `ダウンロード中 → 検証中 → 展開中 → DL済み` の順で表示される。公式リリースの tar.bz2 直取得ではハッシュがないため `検証中` を省き、`ダウンロード中 → 展開中 → DL済み` となる。Haas-ja は公式配布元から取得する場合も組み込みの SHA-256 で検証する。接続失敗・タイムアウト時は `モデル配布元に接続できません。ネットワーク接続を確認してください: <URL>` を表示する。共有パスの場合は `社内サーバーの共有パスに接続できません` / `ファイルがありません` / `共有権限を確認してください` を表示する。
 
 #### ローカルモックでの確認
 
@@ -310,7 +332,7 @@ ASR が返す読みを完全一致で置換する。
 |---|---|---|
 | `first_run` | `true` | オンボーディングを表示するか |
 | `model` | `sensevoice` | 使用モデル ID |
-| `model_base_url` | `""` | モデル配布元。空なら公式リリース (GitHub) から直接ダウンロード。`https://...` / UNC / 絶対パスを指定すると社内配布元。平文 HTTP はループバックのみ |
+| `model_base_url` | `""` | モデル配布元。空なら公式配布元 (sherpa-onnx GitHub / Hugging Face) から直接ダウンロード。`https://...` / UNC / 絶対パスを指定すると社内配布元。平文 HTTP はループバックのみ |
 | `hotkey` | `alt_r` | 押している間だけ録音するキー |
 | `autostart` | `false` | Windows ログオン時に自動起動 |
 | `device` | (なし) | 入力デバイスの番号または名前の一部 |
@@ -334,11 +356,21 @@ ASR が返す読みを完全一致で置換する。
 | `today_chars` | 当日の入力文字数。ローカル日付の変更時に 0 へ戻る |
 | `today_date` | `today_chars` が属するローカル日付 (`YYYY-MM-DD`) |
 
-- 認識結果の本文・音声・履歴は保存しない。加算されるのは、テキスト整形後の文字数と貼り付け成功回数のみ
+- 累積実績には認識結果の本文・音声を保存しない（本文は別途 `history.json` に直近10件だけ保存）
 - 加算は `Ctrl+V` の送信まで成功した時点。貼り付け先が変わって送信しなかった場合は数えない
 - 書き込みは同一ディレクトリの `stats.json.tmp` へ書き切って `sync_all` した後に置き換えるため、途中でクラッシュしても既存ファイルは壊れない
 - 推定削減時間は 200 文字/分で換算する (`total_chars / 200` 分)。設定画面では 60 分以上を「約 X.X 時間」で表示する
 - ファイルを削除すると 0 から再集計される。壊れた JSON は警告をログへ出し、0 から再開する
+
+## 認識履歴 (`history.json`)
+
+確定した認識テキストを、ローカル日時・使用モデル名とともに直近10件だけ保存する。保存先は `config.toml` と同じディレクトリの `history.json`。
+
+- 設定画面の「履歴」タブに新しい順で表示される
+- 各行のコピーボタンで、そのテキストをクリップボードへ送る
+- 「全件クリア」で `history.json` ごと空にする
+- 書き込みは `history.json.tmp` へ書き切って `sync_all` した後に置き換えるため、途中でクラッシュしても既存の履歴は壊れない
+- 履歴ファイルが壊れている場合は警告をログへ出し、空の履歴で起動する
 
 ## コマンドライン
 
@@ -348,7 +380,7 @@ BAREVoiceJP [オプション]
 
 | オプション | 既定値 | 内容 |
 |---|---|---|
-| `--model NAME` | `sensevoice` | `sensevoice` / `reazonspeech` / `whisper-base` / `whisper-small` / `whisper-turbo` |
+| `--model NAME` | `sensevoice` | `sensevoice` / `reazonspeech` / `haas-ja-v1.0` / `whisper-base` / `whisper-small` / `whisper-turbo` |
 | `--model-dir DIR` | `models/<name>` | モデルのディレクトリ |
 | `--hotkey KEY` | `alt_r` | 録音キー |
 | `--device SPEC` | 既定デバイス | 入力デバイス番号または名前の一部 |
@@ -376,7 +408,7 @@ BAREVoiceJP [オプション]
 cargo test
 ```
 
-ユニットテストはテキスト整形・設定・音声・状態管理・累積実績の保存などをカバーする。
+ユニットテストはテキスト整形・設定・音声・状態管理・累積実績・認識履歴の保存などをカバーする。
 
 テキスト整形だけを音声なしで評価できる (`tests/text_cases.json`)。
 
@@ -394,12 +426,13 @@ src/
   main.rs       エントリポイント (CLI → 設定 → エンジン → マイク → UI)
   config.rs     CLI解析・設定・チューニング定数
   engine.rs     sherpa-onnx の FFI ラッパーとモデル解決
-  models.rs     モデル定義とダウンロード (tar.bz2 展開)
+  models.rs     モデル定義とダウンロード (tar.bz2 展開 / 直接ファイル配置)
   audio.rs      録音 (cpal)、リングバッファ、無音判定
   text.rs       テキスト整形と辞書 (words / replacements / hotwords)
   app.rs        録音 → 推論 → 貼り付けのパイプライン
   state.rs      状態管理
   stats.rs      累積実績 (stats.json のアトミック保存)
+  history.rs    認識履歴 (history.json のアトミック保存、直近10件)
   win.rs        Win32 (ホットキー、SendInput、クリップボード、自動起動)
   overlay.rs    フローティングバー (tiny-skia)
   tray.rs       タスクトレイ

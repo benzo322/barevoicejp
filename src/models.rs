@@ -1,7 +1,8 @@
-//! モデルのダウンロード・展開・削除。
+//! モデルのダウンロード・配置・削除。
 //!
-//! sherpa-onnx の公式リリースから tar.bz2 を取得し、`models/` 配下へ
-//! 展開する。進捗は UI が読めるようプロセス内で共有する。
+//! tar.bz2 は展開し、Haas-ja のような直接配布モデルは ONNX 一式を
+//! そのまま `models/` 配下へ配置する。進捗は UI が読めるよう
+//! プロセス内で共有する。
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -14,12 +15,20 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{self, Config};
 
-/// 公式リリース (sherpa-onnx / GitHub Releases) のアーカイブ置き場。
+/// tar.bz2 配布モデル (sherpa-onnx / GitHub Releases) の公式置き場。
 ///
 /// `model_base_url` が空のときは、ここから直接 tar.bz2 を取得する。
 /// 社内サーバーを使う場合は `config.toml` の `model_base_url` で上書きする。
-pub(crate) const OFFICIAL_RELEASE: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
+/// Haas-ja は `Package::Files` の `official_base` (Hugging Face) を使う。
+const OFFICIAL_RELEASE: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models";
+
+/// `model_base_url` 未設定時に設定画面へ表示する配布元の説明。
+///
+/// モデルごとに公式配布元が異なる (sherpa-onnx GitHub / Hugging Face) ため、
+/// 単一の URL ではなく説明を返す。
+pub(crate) fn official_source_label() -> &'static str {
+    "公式配布元 (sherpa-onnx GitHub / Hugging Face)"
+}
 
 /// 配布元のルートに置く SHA-256 マニフェスト名。
 const MANIFEST_FILE: &str = "checksums.sha256";
@@ -51,30 +60,112 @@ fn http_agent(body_timeout: Duration) -> ureq::Agent {
 ///
 /// ureq の TLS プロバイダは既定で Rustls だが、本クレートは native-tls のみを
 /// 有効にしている。プロバイダを明示しないと HTTPS 接続時に ureq が panic する。
-static HTTP: LazyLock<ureq::Agent> = LazyLock::new(|| http_agent(Duration::from_secs(30 * 60)));
+/// Haas-ja の `encoder.data` は約 2.4 GB あるため、本文の総時間を長めに取る。
+static HTTP: LazyLock<ureq::Agent> = LazyLock::new(|| http_agent(Duration::from_secs(2 * 60 * 60)));
 
 /// マニフェスト用。本文が小さいので短いタイムアウトにする。
 static HTTP_MANIFEST: LazyLock<ureq::Agent> = LazyLock::new(|| http_agent(Duration::from_secs(30)));
+
+/// Haas-ja-v1.0 の公式配布元 (Hugging Face)。
+const HAAS_JA_OFFICIAL: &str = "https://huggingface.co/oboroge0/Haas-ja-v1.0-onnx/resolve/main";
+
+/// 直接配置するファイル 1 つ分の定義。
+struct RemoteFile {
+    name: &'static str,
+    /// 公式配布元でのサイズ (進捗表示用)。
+    size: u64,
+    /// 公式配布元の SHA-256。
+    sha256: &'static str,
+}
+
+/// Haas-ja-v1.0 の配布ファイル。
+///
+/// `encoder.onnx` は外部データ `encoder.data` を参照するため、必ず同一
+/// ディレクトリへ配置する。
+const HAAS_JA_FILES: [RemoteFile; 5] = [
+    RemoteFile {
+        name: "encoder.onnx",
+        size: 41_836_973,
+        sha256: "8e34e59e7a2dff1dbda2d91c4ba1d9673f976da74db25597883a185088300757",
+    },
+    RemoteFile {
+        name: "encoder.data",
+        size: 2_435_420_160,
+        sha256: "7aa9d630b66a2317f615c7094c201ca1049d3b14b0a2515f42a8eea0c17e410a",
+    },
+    RemoteFile {
+        name: "decoder.onnx",
+        size: 15_661_602,
+        sha256: "2947cb5512699cbba753fe45fe221428aadaa9856597debbb7aabe19cc253622",
+    },
+    RemoteFile {
+        name: "joiner.onnx",
+        size: 12_158_641,
+        sha256: "8a68320e750890ff9e944a794b41ae1c42c6f439ac4c273503458a6b42adc12d",
+    },
+    RemoteFile {
+        name: "tokens.txt",
+        size: 28_704,
+        sha256: "ec78b13c5d9f156cf0d5fdbd6b5aec5785680f319c92630c11d5d11b14b83a84",
+    },
+];
 
 /// 設定画面に表示するモデル。
 pub(crate) struct ModelSpec {
     pub(crate) id: &'static str,
     pub(crate) name: &'static str,
     pub(crate) subtitle: &'static str,
-    pub(crate) archive: &'static str,
+    package: Package,
     pub(crate) size_label: &'static str,
     pub(crate) speed: u8,
     pub(crate) accuracy: u8,
     pub(crate) recommended: bool,
 }
 
+/// モデルの配布形式。
+enum Package {
+    /// tar.bz2 をダウンロードして `models/` へ展開する。
+    Archive(&'static str),
+    /// ONNX 等のファイルを個別にダウンロードして配置する。
+    Files {
+        /// `model_base_url` が空のときの公式ベース URL。
+        official_base: &'static str,
+        files: &'static [RemoteFile],
+    },
+}
+
+impl Package {
+    fn archive(&self) -> Option<&'static str> {
+        match self {
+            Self::Archive(archive) => Some(archive),
+            Self::Files { .. } => None,
+        }
+    }
+
+    fn files(&self) -> &'static [RemoteFile] {
+        match self {
+            Self::Archive(_) => &[],
+            Self::Files { files, .. } => files,
+        }
+    }
+
+    fn official_base(&self) -> &'static str {
+        match self {
+            Self::Archive(_) => OFFICIAL_RELEASE,
+            Self::Files { official_base, .. } => official_base,
+        }
+    }
+}
+
 /// 表示順に並べたモデル定義。
-pub(crate) const SPECS: [ModelSpec; 5] = [
+pub(crate) const SPECS: [ModelSpec; 6] = [
     ModelSpec {
         id: "sensevoice",
         name: "SenseVoice",
         subtitle: "日本語・英語・中国語・韓国語・広東語。バランスの良い定番。",
-        archive: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+        package: Package::Archive(
+            "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+        ),
         size_label: "約 155 MB",
         speed: 5,
         accuracy: 4,
@@ -84,9 +175,22 @@ pub(crate) const SPECS: [ModelSpec; 5] = [
         id: "reazonspeech",
         name: "ReazonSpeech",
         subtitle: "日本語音声に特化。長い発話でも安定した精度。",
-        archive: "sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2",
+        package: Package::Archive("sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01.tar.bz2"),
         size_label: "約 680 MB",
         speed: 4,
+        accuracy: 5,
+        recommended: false,
+    },
+    ModelSpec {
+        id: "haas-ja-v1.0",
+        name: "Haas-ja-v1.0",
+        subtitle: "日本語特化。高精度だが約 2.7 GB のメモリを使用。",
+        package: Package::Files {
+            official_base: HAAS_JA_OFFICIAL,
+            files: &HAAS_JA_FILES,
+        },
+        size_label: "約 2.5 GB",
+        speed: 3,
         accuracy: 5,
         recommended: false,
     },
@@ -94,7 +198,7 @@ pub(crate) const SPECS: [ModelSpec; 5] = [
         id: "whisper-base",
         name: "Whisper Base",
         subtitle: "軽量で起動が速い。短いメモやチャット向け。",
-        archive: "sherpa-onnx-whisper-base.tar.bz2",
+        package: Package::Archive("sherpa-onnx-whisper-base.tar.bz2"),
         size_label: "約 198 MB",
         speed: 5,
         accuracy: 3,
@@ -104,7 +208,7 @@ pub(crate) const SPECS: [ModelSpec; 5] = [
         id: "whisper-small",
         name: "Whisper Small",
         subtitle: "速度と精度のバランス型。幅広い音声に対応。",
-        archive: "sherpa-onnx-whisper-small.tar.bz2",
+        package: Package::Archive("sherpa-onnx-whisper-small.tar.bz2"),
         size_label: "約 610 MB",
         speed: 3,
         accuracy: 4,
@@ -114,7 +218,7 @@ pub(crate) const SPECS: [ModelSpec; 5] = [
         id: "whisper-turbo",
         name: "Whisper Turbo",
         subtitle: "高い認識精度。マシンパワーに余裕がある場合に。",
-        archive: "sherpa-onnx-whisper-turbo.tar.bz2",
+        package: Package::Archive("sherpa-onnx-whisper-turbo.tar.bz2"),
         size_label: "約 538 MB",
         speed: 2,
         accuracy: 5,
@@ -127,7 +231,12 @@ fn spec(id: &str) -> Option<&'static ModelSpec> {
     SPECS.iter().find(|spec| spec.id == id)
 }
 
-/// モデルの配布元。公式リリース、社内 HTTPS サーバー、UNC/絶対パス共有。
+/// 設定画面・履歴表示用のモデル名を返す。
+pub(crate) fn model_name(id: &str) -> &'static str {
+    spec(id).map(|spec| spec.name).unwrap_or("Unknown")
+}
+
+/// モデルの配布元。公式配布元、社内 HTTPS サーバー、UNC/絶対パス共有。
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Source {
     /// `model_base_url` 未設定時の直接ダウンロード。
@@ -139,7 +248,7 @@ enum Source {
 impl Source {
     /// `config.toml` の `model_base_url` を解釈する。
     ///
-    /// 空文字は公式リリースからの直接ダウンロードを意味する。
+    /// 空文字は公式配布元からの直接ダウンロードを意味する。
     fn parse(base: &str) -> Result<Self, String> {
         let base = base.trim().trim_end_matches('/');
         if base.is_empty() {
@@ -180,11 +289,11 @@ impl Source {
         }
     }
 
-    /// HTTP 配布元のアーカイブ URL。ローカル共有なら `None`。
-    fn archive_url(&self, archive: &str) -> Option<String> {
+    /// 配布元のファイル URL。ローカル共有なら `None`。
+    fn file_url(&self, spec: &ModelSpec, name: &str) -> Option<String> {
         match self {
-            Self::Official => Some(format!("{OFFICIAL_RELEASE}/{archive}")),
-            Self::Http(base) => Some(format!("{base}/{archive}")),
+            Self::Official => Some(format!("{}/{name}", spec.package.official_base())),
+            Self::Http(base) => Some(format!("{base}/{name}")),
             Self::File(_) => None,
         }
     }
@@ -216,7 +325,7 @@ impl Source {
                 }
                 Ok(text)
             }
-            Self::Official => Err(format!("公式リリースには {MANIFEST_FILE} がありません")),
+            Self::Official => Err(format!("公式配布元には {MANIFEST_FILE} がありません")),
             Self::File(dir) => {
                 let path = dir.join(MANIFEST_FILE);
                 let metadata = fs::metadata(&path).map_err(|exc| file_error(&path, exc))?;
@@ -476,6 +585,13 @@ fn installed_at(dir: &Path, id: &str) -> bool {
             .iter()
             .any(|name| name.contains(needle) && name.ends_with(suffix))
     };
+    if let Some(spec) = spec(id)
+        && let Package::Files { files, .. } = &spec.package
+    {
+        return files
+            .iter()
+            .all(|file| names.iter().any(|name| name.as_str() == file.name));
+    }
     match id {
         "sensevoice" => {
             (names.iter().any(|name| {
@@ -521,7 +637,8 @@ pub(crate) fn installed_bytes(dir: &Path) -> u64 {
 }
 
 fn archive_path(id: &str) -> Option<PathBuf> {
-    spec(id).map(|spec| config::models_root().join(".cache").join(spec.archive))
+    let archive = spec(id)?.package.archive()?;
+    Some(config::models_root().join(".cache").join(archive))
 }
 
 /// モデルをダウンロードして展開する。完了・失敗時は `done` を呼ぶ。
@@ -601,38 +718,34 @@ fn run_download_with_cache(
             return;
         }
     };
+    let Some(archive_name) = spec.package.archive() else {
+        run_file_download(id, spec, dest, &source);
+        return;
+    };
     if let Err(exc) = fs::create_dir_all(cache_dir) {
         fail(id, format!("キャッシュディレクトリを作成できません: {exc}"));
         return;
     }
-    let archive = cache_dir.join(spec.archive);
+    let archive = cache_dir.join(archive_name);
     let expected = match &source {
         Source::Official => {
-            crate::info!("公式リリースからモデルを取得します: {}", spec.archive);
+            crate::info!("公式配布元からモデルを取得します: {archive_name}");
             None
         }
         _ => {
-            let manifest = match source.manifest_text() {
-                Ok(manifest) => manifest,
-                Err(exc) => {
-                    fail(id, exc);
-                    return;
-                }
-            };
-            let hashes = match parse_sha256_manifest(&manifest) {
+            let hashes = match manifest_hashes(&source) {
                 Ok(hashes) => hashes,
                 Err(exc) => {
                     fail(id, exc);
                     return;
                 }
             };
-            let Some(expected) = hashes.get(spec.archive) else {
+            let Some(expected) = hashes.get(archive_name) else {
                 fail(
                     id,
                     format!(
-                        "{MANIFEST_FILE} に {} の SHA-256 がありません。\
-                         配布元のマニフェストを確認してください。",
-                        spec.archive
+                        "{MANIFEST_FILE} に {archive_name} の SHA-256 がありません。\
+                         配布元のマニフェストを確認してください。"
                     ),
                 );
                 return;
@@ -640,7 +753,16 @@ fn run_download_with_cache(
             Some(expected.clone())
         }
     };
-    if let Err(exc) = fetch(id, &source, spec.archive, &archive, expected.as_deref()) {
+    if let Err(exc) = fetch(
+        id,
+        &source,
+        spec,
+        archive_name,
+        &archive,
+        expected.as_deref(),
+        0,
+        0,
+    ) {
         fail(id, exc);
         return;
     }
@@ -677,20 +799,129 @@ fn run_download_with_cache(
     crate::info!("モデルを展開しました: {}", dest.display());
 }
 
-/// 配布元から tar.bz2 を `.part` へ取得し、SHA-256 検証後に確定する。
+/// 配布元の SHA-256 マニフェストを読み、ファイル名 → ハッシュにする。
+fn manifest_hashes(source: &Source) -> Result<HashMap<String, String>, String> {
+    parse_sha256_manifest(&source.manifest_text()?)
+}
+
+/// ONNX 等を 1 ファイルずつ取得し、一時ディレクトリから `dest` へ移す。
+fn run_file_download(id: &str, spec: &ModelSpec, dest: &Path, source: &Source) {
+    let files = spec.package.files();
+    let total = files.iter().map(|file| file.size).sum::<u64>();
+    let hashes = match source {
+        Source::Official => None,
+        _ => match manifest_hashes(source) {
+            Ok(hashes) => Some(hashes),
+            Err(exc) => {
+                fail(id, exc);
+                return;
+            }
+        },
+    };
+
+    let temp_root = dest.parent().unwrap_or(Path::new("."));
+    let temp = temp_root.join(format!(".extract-{id}"));
+    if temp.exists()
+        && let Err(exc) = fs::remove_dir_all(&temp)
+    {
+        fail(id, format!("古い一時ディレクトリを削除できません: {exc}"));
+        return;
+    }
+    if let Err(exc) = fs::create_dir_all(&temp) {
+        fail(id, format!("一時ディレクトリを作成できません: {exc}"));
+        return;
+    }
+
+    let mut downloaded = 0u64;
+    for file in files {
+        let expected = match &hashes {
+            Some(hashes) => match hashes.get(file.name) {
+                Some(expected) => expected.as_str(),
+                None => {
+                    fail(
+                        id,
+                        format!(
+                            "{MANIFEST_FILE} に {} の SHA-256 がありません。\
+                             配布元のマニフェストを確認してください。",
+                            file.name
+                        ),
+                    );
+                    let _ = fs::remove_dir_all(&temp);
+                    return;
+                }
+            },
+            None => file.sha256,
+        };
+        let target = temp.join(file.name);
+        match fetch(
+            id,
+            source,
+            spec,
+            file.name,
+            &target,
+            Some(expected),
+            downloaded,
+            total,
+        ) {
+            Ok(bytes) => downloaded = downloaded.saturating_add(bytes),
+            Err(exc) => {
+                fail(id, exc);
+                let _ = fs::remove_dir_all(&temp);
+                return;
+            }
+        }
+    }
+
+    if dest.exists() {
+        fail(id, format!("展開先が既に存在します: {}", dest.display()));
+        let _ = fs::remove_dir_all(&temp);
+        return;
+    }
+    if let Err(exc) = fs::rename(&temp, dest) {
+        fail(id, format!("{} へ移動できません: {exc}", spec.name));
+        let _ = fs::remove_dir_all(&temp);
+        return;
+    }
+    let bytes = installed_bytes(dest);
+    update(
+        id,
+        DownloadState {
+            phase: Phase::Done,
+            downloaded: bytes,
+            total: bytes,
+            error: None,
+        },
+    );
+    crate::info!("モデルを配置しました: {}", dest.display());
+}
+
+/// `.part` を付けた一時パス。
+///
+/// `with_extension` は `encoder.onnx` と `encoder.data` を同じ名前にして
+/// しまうため、拡張子を保ったまま末尾へ足す。
+fn part_path(path: &Path) -> PathBuf {
+    let mut part = path.as_os_str().to_os_string();
+    part.push(".part");
+    PathBuf::from(part)
+}
+
+/// 配布元から 1 ファイルを `.part` へ取得し、SHA-256 検証後に確定する。
 fn fetch(
     id: &str,
     source: &Source,
-    archive_name: &str,
-    archive: &Path,
+    spec: &ModelSpec,
+    file_name: &str,
+    target: &Path,
     expected: Option<&str>,
-) -> Result<(), String> {
-    let part = archive.with_extension("part");
-    let (reader, total): (Box<dyn Read>, u64) = match source {
+    base: u64,
+    grand_total: u64,
+) -> Result<u64, String> {
+    let part = part_path(target);
+    let (reader, file_total): (Box<dyn Read>, u64) = match source {
         Source::Official | Source::Http(_) => {
             let url = source
-                .archive_url(archive_name)
-                .expect("HTTP 配布元にはアーカイブ URL がある");
+                .file_url(spec, file_name)
+                .expect("HTTP 配布元にはファイル URL がある");
             let response = http_get(&HTTP, &url).map_err(|exc| http_error(&url, exc))?;
             let total = response
                 .body()
@@ -705,7 +936,7 @@ fn fetch(
                 .unwrap_or(0);
             if total > MAX_ARCHIVE_BYTES {
                 return Err(format!(
-                    "配布元のアーカイブが大きすぎます（{} バイト）: {}",
+                    "配布元のファイルが大きすぎます（{} バイト）: {}",
                     total,
                     config::redact_source(&url)
                 ));
@@ -713,19 +944,19 @@ fn fetch(
             (Box::new(response.into_body().into_reader()), total)
         }
         Source::File(dir) => {
-            let path = dir.join(archive_name);
+            let path = dir.join(file_name);
             let file = File::open(&path).map_err(|exc| file_error(&path, exc))?;
             let total = file.metadata().map(|meta| meta.len()).unwrap_or(0);
             if total > MAX_ARCHIVE_BYTES {
                 return Err(format!(
-                    "配布元のアーカイブが大きすぎます（{total} バイト）: {}",
+                    "配布元のファイルが大きすぎます（{total} バイト）: {}",
                     path.display()
                 ));
             }
             (Box::new(file), total)
         }
     };
-    let downloaded = match copy_with_progress(id, reader, total, &part) {
+    let downloaded = match copy_with_progress(id, reader, file_total, &part, base, grand_total) {
         Ok(downloaded) => downloaded,
         Err(exc) => {
             let _ = fs::remove_file(&part);
@@ -733,12 +964,18 @@ fn fetch(
         }
     };
     if let Some(expected) = expected {
+        let shown = base.saturating_add(downloaded);
+        let shown_total = if grand_total > 0 {
+            grand_total
+        } else {
+            file_total
+        };
         update(
             id,
             DownloadState {
                 phase: Phase::Verifying,
-                downloaded,
-                total: total.max(downloaded),
+                downloaded: shown,
+                total: shown_total.max(shown),
                 error: None,
             },
         );
@@ -747,22 +984,27 @@ fn fetch(
             return Err(exc);
         }
     }
-    if archive.exists() {
-        let _ = fs::remove_file(archive);
+    if target.exists() {
+        let _ = fs::remove_file(target);
     }
-    fs::rename(&part, archive).map_err(|exc| {
+    fs::rename(&part, target).map_err(|exc| {
         let _ = fs::remove_file(&part);
-        format!("アーカイブを確定できません: {exc}")
+        format!("ファイルを確定できません: {exc}")
     })?;
-    Ok(())
+    Ok(downloaded)
 }
 
 /// 受信しながら `.part` へ書き、120ms 間隔で進捗を更新する。
+///
+/// `base` は複数ファイルを続けて取得する際の既完了バイト数、
+/// `grand_total` はモデル全体の合計サイズ (0 なら単一ファイルのサイズ)。
 fn copy_with_progress<R: Read>(
     id: &str,
     mut reader: R,
-    total: u64,
+    file_total: u64,
     part: &Path,
+    base: u64,
+    grand_total: u64,
 ) -> Result<u64, String> {
     let mut file =
         File::create(part).map_err(|exc| format!("一時ファイルを作成できません: {exc}"))?;
@@ -779,19 +1021,25 @@ fn copy_with_progress<R: Read>(
         if downloaded.saturating_add(read as u64) > MAX_ARCHIVE_BYTES {
             return Err(format!(
                 "受信データが上限（{MAX_ARCHIVE_BYTES} バイト）を超えました。\
-                 配布元のアーカイブを確認してください。"
+                 配布元のファイルを確認してください。"
             ));
         }
         file.write_all(&buffer[..read])
             .map_err(|exc| format!("受信データを書き込めません: {exc}"))?;
         downloaded += read as u64;
         if last_report.elapsed() >= Duration::from_millis(120) {
+            let shown = base.saturating_add(downloaded);
+            let total = if grand_total > 0 {
+                grand_total
+            } else {
+                file_total
+            };
             update(
                 id,
                 DownloadState {
                     phase: Phase::Downloading,
-                    downloaded,
-                    total,
+                    downloaded: shown,
+                    total: total.max(shown),
                     error: None,
                 },
             );
@@ -801,18 +1049,24 @@ fn copy_with_progress<R: Read>(
     file.flush()
         .map_err(|exc| format!("受信データを保存できません: {exc}"))?;
     drop(file);
-    if total > 0 && downloaded != total {
+    if file_total > 0 && downloaded != file_total {
         return Err(format!(
-            "配布元から受信したサイズが一致しません（期待 {total} / 実際 {downloaded} バイト）。\
+            "配布元から受信したサイズが一致しません（期待 {file_total} / 実際 {downloaded} バイト）。\
              再ダウンロードしてください。"
         ));
     }
+    let shown = base.saturating_add(downloaded);
+    let total = if grand_total > 0 {
+        grand_total
+    } else {
+        file_total
+    };
     update(
         id,
         DownloadState {
             phase: Phase::Downloading,
-            downloaded,
-            total: total.max(downloaded),
+            downloaded: shown,
+            total: total.max(shown),
             error: None,
         },
     );
@@ -977,14 +1231,17 @@ mod tests {
         }
         assert_eq!(Source::parse(""), Ok(Source::Official));
         assert_eq!(
-            Source::Official.archive_url("model.tar.bz2").as_deref(),
+            Source::Official
+                .file_url(&SPECS[0], "model.tar.bz2")
+                .as_deref(),
             Some(
                 "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/model.tar.bz2"
             )
         );
+        let haas = spec("haas-ja-v1.0").expect("Haas の定義");
         assert_eq!(
-            Source::Official.archive_url(""),
-            Some(format!("{OFFICIAL_RELEASE}/"))
+            Source::Official.file_url(haas, "encoder.onnx").as_deref(),
+            Some("https://huggingface.co/oboroge0/Haas-ja-v1.0-onnx/resolve/main/encoder.onnx")
         );
         assert!(Source::parse("relative/models").is_err());
         assert!(Source::parse("htps://typo/models").is_err());
@@ -1070,35 +1327,44 @@ BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  models/other.t
         fetch(
             "test-file-ok",
             &Source::File(source_dir.clone()),
+            &SPECS[0],
             archive_name,
             &archive,
             Some(&expected),
+            0,
+            0,
         )
         .expect("コピーと検証");
         assert_eq!(fs::read(&archive).expect("archive"), payload);
-        assert!(!archive.with_extension("part").exists());
+        assert!(!part_path(&archive).exists());
 
         let bad_archive = cache_dir.join("bad.tar.bz2");
         let error = fetch(
             "test-file-bad",
             &Source::File(source_dir),
+            &SPECS[0],
             archive_name,
             &bad_archive,
             Some(&"0".repeat(64)),
+            0,
+            0,
         )
         .expect_err("ハッシュ不一致");
         assert!(error.contains("SHA-256"), "{error}");
         assert!(!bad_archive.exists());
-        assert!(!bad_archive.with_extension("part").exists());
+        assert!(!part_path(&bad_archive).exists());
 
-        // 公式リリース直取得 (expected=None) はハッシュ検証を省いて確定する。
+        // 公式配布元直取得 (expected=None) はハッシュ検証を省いて確定する。
         let unverified = cache_dir.join("unverified.tar.bz2");
         fetch(
             "test-file-unverified",
             &Source::File(dir.join("source")),
+            &SPECS[0],
             archive_name,
             &unverified,
             None,
+            0,
+            0,
         )
         .expect("ハッシュなしのコピー");
         assert_eq!(fs::read(&unverified).expect("archive"), payload);
@@ -1155,7 +1421,17 @@ BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  models/other.t
         let hashes = parse_sha256_manifest(&manifest).expect("manifest parse");
         let expected = hashes.get(archive_name).expect("entry");
         let archive = dir.join(archive_name);
-        fetch("test-http", &source, archive_name, &archive, Some(expected)).expect("fetch");
+        fetch(
+            "test-http",
+            &source,
+            &SPECS[0],
+            archive_name,
+            &archive,
+            Some(expected),
+            0,
+            0,
+        )
+        .expect("fetch");
         assert_eq!(fs::read(&archive).expect("archive"), payload);
         server.join().expect("server");
         fs::remove_dir_all(dir).expect("後片付け");
@@ -1200,7 +1476,7 @@ BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  models/other.t
             id: "test-model",
             name: "Test",
             subtitle: "",
-            archive: archive_name,
+            package: Package::Archive(archive_name),
             size_label: "",
             speed: 1,
             accuracy: 1,
@@ -1220,6 +1496,86 @@ BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  models/other.t
         assert_eq!(state.phase, Phase::Done);
         assert!(state.error.is_none(), "{:?}", state.error);
         assert!(!cache_dir.join(archive_name).exists());
+
+        fs::remove_dir_all(dir).expect("後片付け");
+    }
+
+    #[test]
+    fn downloads_direct_files_and_reports_done_from_file_source() {
+        let dir = temp_dir("run-files");
+        let source_dir = dir.join("source");
+        let dest = dir.join("installed");
+        fs::create_dir_all(&source_dir).expect("source");
+
+        let payloads = [
+            ("encoder.onnx", b"encoder".as_slice()),
+            ("encoder.data", b"external data".as_slice()),
+            ("decoder.onnx", b"decoder".as_slice()),
+            ("joiner.onnx", b"joiner".as_slice()),
+            ("tokens.txt", b"tokens".as_slice()),
+        ];
+        let files: &'static [RemoteFile] = &[
+            RemoteFile {
+                name: "encoder.onnx",
+                size: 7,
+                sha256: "",
+            },
+            RemoteFile {
+                name: "encoder.data",
+                size: 13,
+                sha256: "",
+            },
+            RemoteFile {
+                name: "decoder.onnx",
+                size: 7,
+                sha256: "",
+            },
+            RemoteFile {
+                name: "joiner.onnx",
+                size: 6,
+                sha256: "",
+            },
+            RemoteFile {
+                name: "tokens.txt",
+                size: 6,
+                sha256: "",
+            },
+        ];
+        let mut manifest = String::new();
+        for (name, data) in payloads {
+            fs::write(source_dir.join(name), data).expect("source file");
+            manifest.push_str(&format!("{}  {name}\n", sha256_hex(data)));
+        }
+        fs::write(source_dir.join(MANIFEST_FILE), manifest).expect("manifest");
+
+        let spec = ModelSpec {
+            id: "test-files",
+            name: "Test Files",
+            subtitle: "",
+            package: Package::Files {
+                official_base: "https://example.invalid",
+                files,
+            },
+            size_label: "",
+            speed: 1,
+            accuracy: 1,
+            recommended: false,
+        };
+        run_download_with_cache(
+            spec.id,
+            &spec,
+            &dest,
+            &source_dir.to_string_lossy(),
+            &dir.join("cache"),
+        );
+
+        for (name, data) in payloads {
+            assert_eq!(fs::read(dest.join(name)).expect("installed"), data);
+        }
+        let state = download_state(spec.id);
+        assert_eq!(state.phase, Phase::Done);
+        assert!(state.error.is_none(), "{:?}", state.error);
+        assert!(!dest.parent().unwrap().join(".extract-test-files").exists());
 
         fs::remove_dir_all(dir).expect("後片付け");
     }

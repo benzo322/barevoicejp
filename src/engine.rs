@@ -1,7 +1,7 @@
 //! sherpa-onnx C-API の最小 FFI バインディングと推論エンジン。
 //!
 //! `include/sherpa-onnx/c-api/c-api.h` の構造体レイアウトをそのまま写し、
-//! SenseVoice / ReazonSpeech (transducer) / Whisper のオフライン認識を扱う。
+//! SenseVoice / ReazonSpeech / Haas-ja (transducer) / Whisper のオフライン認識を扱う。
 
 use std::ffi::{CStr, CString, c_char};
 use std::fs;
@@ -321,7 +321,7 @@ impl Drop for ResultGuard {
 // ---------------------------------------------------------------------------
 // エンジン
 // ---------------------------------------------------------------------------
-/// SenseVoice / ReazonSpeech / Whisper のオフライン認識エンジン。
+/// SenseVoice / ReazonSpeech / Haas-ja / Whisper のオフライン認識エンジン。
 pub(crate) struct Engine {
     recognizer: Recognizer,
     sample_rate: i32,
@@ -334,10 +334,12 @@ impl Engine {
         match config.model.as_str() {
             "sensevoice" => Self::sense_voice(config),
             "reazonspeech" => Self::reazonspeech(config),
+            "haas-ja-v1.0" => Self::haas(config),
             "whisper-base" | "whisper-small" | "whisper-turbo" => Self::whisper(config),
             other => Err(format!(
                 "不明なモデル種別です: {other} \
-                 (sensevoice / reazonspeech / whisper-base / whisper-small / whisper-turbo)"
+                 (sensevoice / reazonspeech / haas-ja-v1.0 / \
+                 whisper-base / whisper-small / whisper-turbo)"
             )),
         }
     }
@@ -419,19 +421,66 @@ impl Engine {
             "ReazonSpeech モデル読み込み: {}",
             encoder.parent().unwrap_or(&dir).display()
         );
-        let recognizer =
-            create_transducer(config, &encoder, &decoder, &joiner, &tokens).map_err(|exc| {
-                format!(
-                    "ReazonSpeech モデルの初期化に失敗しました: {}\n\
-                     \x20 provider={} / num_threads={}\n\
-                     \x20 詳細: {exc}",
-                    dir.display(),
-                    config.provider,
-                    config.num_threads
-                )
-            })?;
+        let recognizer = create_transducer(
+            config,
+            &encoder,
+            &decoder,
+            &joiner,
+            &tokens,
+            None,
+            config::FEATURE_DIM,
+        )
+        .map_err(|exc| {
+            format!(
+                "ReazonSpeech モデルの初期化に失敗しました: {}\n\
+                 \x20 provider={} / num_threads={}\n\
+                 \x20 詳細: {exc}",
+                dir.display(),
+                config.provider,
+                config.num_threads
+            )
+        })?;
         crate::info!(
             "モデル準備完了 (ReazonSpeech / threads={}, provider={})",
+            config.num_threads,
+            config.provider
+        );
+        Ok(Self {
+            recognizer,
+            sample_rate: config.sample_rate as i32,
+            hotwords_supported: false,
+        })
+    }
+
+    fn haas(config: &Config) -> Result<Self, String> {
+        let dir = config.model_dir_for("haas-ja-v1.0");
+        let (encoder, decoder, joiner, tokens) = resolve_haas_files(&dir)?;
+        crate::info!(
+            "Haas-ja モデル読み込み: {}",
+            encoder.parent().unwrap_or(&dir).display()
+        );
+        let recognizer = create_transducer(
+            config,
+            &encoder,
+            &decoder,
+            &joiner,
+            &tokens,
+            Some("nemo_transducer"),
+            config::HAAS_FEATURE_DIM,
+        )
+        .map_err(|exc| {
+            format!(
+                "Haas-ja モデルの初期化に失敗しました: {}\n\
+                 \x20 provider={} / num_threads={}\n\
+                 \x20 詳細: {exc}",
+                dir.display(),
+                config.provider,
+                config.num_threads
+            )
+        })?;
+        crate::info!(
+            "モデル準備完了 (Haas-ja / feature_dim={}, threads={}, provider={})",
+            config::HAAS_FEATURE_DIM,
             config.num_threads,
             config.provider
         );
@@ -562,6 +611,51 @@ fn resolve_reazonspeech_files(dir: &Path) -> Result<(PathBuf, PathBuf, PathBuf, 
     if !missing.is_empty() {
         return Err(format!(
             "ReazonSpeech モデルが見つかりません: {}\n\
+             不足ファイル: {}\n\
+             次のいずれかで用意してください:\n{MODEL_DOWNLOAD_HINT}\
+             または --model-dir /path/to/model-dir を指定してください。",
+            base.display(),
+            missing.join(", ")
+        ));
+    }
+    Ok((encoder, decoder, joiner, tokens))
+}
+
+/// Haas-ja (NeMo transducer) の encoder/decoder/joiner/tokens を探す。
+///
+/// `encoder.onnx` は外部データ `encoder.data` を参照するため、同じ
+/// ディレクトリに存在することも確認する。
+fn resolve_haas_files(dir: &Path) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), String> {
+    let base = if dir.is_file() {
+        dir.parent().unwrap_or(Path::new(".")).to_path_buf()
+    } else {
+        dir.to_path_buf()
+    };
+    let encoder = base.join("encoder.onnx");
+    let encoder_data = base.join("encoder.data");
+    let decoder = base.join("decoder.onnx");
+    let joiner = base.join("joiner.onnx");
+    let tokens = base.join("tokens.txt");
+    let expected = [
+        ("encoder", &encoder),
+        ("encoder.data", &encoder_data),
+        ("decoder", &decoder),
+        ("joiner", &joiner),
+        ("tokens", &tokens),
+    ];
+    let missing: Vec<String> = expected
+        .iter()
+        .filter(|(_, path)| !path.is_file())
+        .map(|(name, path)| {
+            format!(
+                "{name}: {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            )
+        })
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "Haas-ja モデルが見つかりません: {}\n\
              不足ファイル: {}\n\
              次のいずれかで用意してください:\n{MODEL_DOWNLOAD_HINT}\
              または --model-dir /path/to/model-dir を指定してください。",
@@ -736,22 +830,29 @@ fn create_sense_voice(config: &Config, model: &Path, tokens: &Path) -> Result<Re
     Recognizer::from_raw(recognizer)
 }
 
-/// ReazonSpeech (transducer) 用の C 設定を組み立てて認識器を作る。
+/// Transducer 用の C 設定を組み立てて認識器を作る。
+///
+/// ReazonSpeech は既定の Zipformer として `model_type` を渡さず 80 次元、
+/// Haas-ja は NeMo transducer として 128 次元を要求する。
 fn create_transducer(
     config: &Config,
     encoder: &Path,
     decoder: &Path,
     joiner: &Path,
     tokens: &Path,
+    model_type: Option<&str>,
+    feature_dim: i32,
 ) -> Result<Recognizer, String> {
     let encoder = path_string(encoder)?;
     let decoder = path_string(decoder)?;
     let joiner = path_string(joiner)?;
     let tokens = path_string(tokens)?;
     let provider = text_string(&config.provider)?;
+    let model_type = model_type.map(text_string).transpose()?;
     let decoding = text_string("greedy_search")?;
 
     let mut cfg = empty_config(config);
+    cfg.feat_config.feature_dim = feature_dim;
     cfg.model_config.transducer = SherpaOnnxOfflineTransducerModelConfig {
         encoder: encoder.as_ptr(),
         decoder: decoder.as_ptr(),
@@ -759,6 +860,9 @@ fn create_transducer(
     };
     cfg.model_config.tokens = tokens.as_ptr();
     cfg.model_config.provider = provider.as_ptr();
+    if let Some(model_type) = &model_type {
+        cfg.model_config.model_type = model_type.as_ptr();
+    }
     cfg.decoding_method = decoding.as_ptr();
 
     // SAFETY: cfg のポインタはすべて生存中の CString を指している。
@@ -862,6 +966,49 @@ mod tests {
             text,
             "うちの中学は弁当制で持っていけない場合は五十円の学校販売のパンを買う"
         );
+    }
+
+    #[test]
+    #[ignore = "実モデルと sherpa-onnx DLL が必要"]
+    fn transcribes_haas_wav() {
+        let config = Config {
+            model: "haas-ja-v1.0".to_string(),
+            ..Config::default()
+        };
+        let engine = Engine::build(&config).expect("エンジン初期化");
+        let wav = std::fs::read(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01/test_wavs/1.wav"),
+        )
+        .expect("1.wav を読めません");
+        let samples = parse_wav(&wav);
+        let text = engine.transcribe(&samples);
+        eprintln!("text={text:?}");
+        assert!(!text.trim().is_empty());
+    }
+
+    #[test]
+    fn resolves_haas_files_requires_external_data() {
+        let dir =
+            std::env::temp_dir().join(format!("BAREVoiceJP-haas-resolve-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("一時ディレクトリ作成");
+        for name in ["encoder.onnx", "decoder.onnx", "joiner.onnx", "tokens.txt"] {
+            fs::write(dir.join(name), b"").expect("ダミーファイル作成");
+        }
+
+        let error = resolve_haas_files(&dir).expect_err("encoder.data 不足");
+        assert!(error.contains("encoder.data"), "{error}");
+
+        fs::write(dir.join("encoder.data"), b"").expect("外部データ作成");
+        let (encoder, decoder, joiner, tokens) =
+            resolve_haas_files(&dir).expect("Haas ファイル解決");
+        assert!(encoder.ends_with("encoder.onnx"));
+        assert!(decoder.ends_with("decoder.onnx"));
+        assert!(joiner.ends_with("joiner.onnx"));
+        assert!(tokens.ends_with("tokens.txt"));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

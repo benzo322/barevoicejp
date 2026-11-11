@@ -13,6 +13,8 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::audio::{AudioCapture, RingBuffer};
 use crate::config::{self, Config};
 use crate::engine::Engine;
+use crate::history::{self, History, HistoryEntry};
+use crate::models;
 use crate::state::{
     AppState, HybridRelease, HybridState, PressOutcome, ReleaseOutcome, StateMachine, VisualState,
 };
@@ -105,6 +107,8 @@ pub(crate) struct Shared {
     pending_tap: Mutex<Option<PendingTap>>,
     /// 累積文字数・発話回数。本文は保持しない。
     stats: Mutex<Stats>,
+    /// 直近の認識テキスト (新しい順)。
+    history: Mutex<History>,
 }
 
 impl Shared {
@@ -164,6 +168,7 @@ impl Shared {
             hybrid: Mutex::new(HybridState::default()),
             pending_tap: Mutex::new(None),
             stats: Mutex::new(Stats::load(Path::new(stats::STATS_PATH))),
+            history: Mutex::new(History::load(Path::new(history::HISTORY_PATH))),
         })
     }
 
@@ -289,6 +294,42 @@ impl Shared {
         if let Err(exc) = snapshot.save(Path::new(stats::STATS_PATH)) {
             warn!("累積実績を保存できません: {exc}");
         }
+    }
+
+    /// 設定画面へ渡す認識履歴 (新しい順)。
+    pub(crate) fn history(&self) -> Vec<HistoryEntry> {
+        lock(&self.history).entries.clone()
+    }
+
+    /// 認識テキストを履歴へ追加し、`history.json` を更新する。
+    ///
+    /// 保存に失敗してもメモリ上には残し、次の成功時に再試行する。
+    fn record_history(&self, text: &str, model: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let snapshot = {
+            let mut current = lock(&self.history);
+            current.record(HistoryEntry {
+                time: history::local_datetime(),
+                text: text.to_string(),
+                model: model.to_string(),
+            });
+            current.clone()
+        };
+        if let Err(exc) = snapshot.save(Path::new(history::HISTORY_PATH)) {
+            warn!("認識履歴を保存できません: {exc}");
+        }
+    }
+
+    /// 履歴を全件削除し、`history.json` を更新する。
+    pub(crate) fn clear_history(&self) -> Result<(), String> {
+        let snapshot = {
+            let mut current = lock(&self.history);
+            current.clear();
+            current.clone()
+        };
+        snapshot.save(Path::new(history::HISTORY_PATH))
     }
 
     /// 状態機械に合わせて表示状態を揃える。
@@ -837,6 +878,7 @@ fn process(engine: &Engine, shared: &Shared, item: &Utterance) {
     }
     let chars = stats::char_count(&formatted);
     info!("認識結果: {chars} 文字 (本文はログに残しません)");
+    shared.record_history(&formatted, models::model_name(&config.model));
 
     lock(&shared.state).begin_pasting();
     shared.settle_visual();

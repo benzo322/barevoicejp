@@ -13,6 +13,7 @@ mod audio;
 mod config;
 mod engine;
 mod eval;
+mod history;
 mod logging;
 mod models;
 mod overlay;
@@ -67,7 +68,7 @@ fn main() {
         config.hotkey = "alt_r".to_string();
     }
     if config.model_base_url.trim().is_empty() {
-        info!("モデル配布元: 公式リリース (GitHub)");
+        info!("モデル配布元: {}", models::official_source_label());
     } else {
         info!(
             "モデル配布元: {}",

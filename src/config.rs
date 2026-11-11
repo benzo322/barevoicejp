@@ -11,14 +11,16 @@ use serde::{Deserialize, Serialize};
 // モデルディレクトリ名。`models/` 配下の展開先と一致させる。
 const SENSEVOICE_DIR_NAME: &str = "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17";
 const REAZONSPEECH_DIR_NAME: &str = "sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01";
+const HAAS_JA_DIR_NAME: &str = "Haas-ja-v1.0-onnx";
 const WHISPER_BASE_DIR_NAME: &str = "sherpa-onnx-whisper-base";
 const WHISPER_SMALL_DIR_NAME: &str = "sherpa-onnx-whisper-small";
 const WHISPER_TURBO_DIR_NAME: &str = "sherpa-onnx-whisper-large-v3-turbo";
 
 /// UI と CLI が受け付けるモデル ID。
-pub(crate) const MODEL_IDS: [&str; 5] = [
+pub(crate) const MODEL_IDS: [&str; 6] = [
     "sensevoice",
     "reazonspeech",
+    "haas-ja-v1.0",
     "whisper-base",
     "whisper-small",
     "whisper-turbo",
@@ -28,6 +30,7 @@ pub(crate) const MODEL_IDS: [&str; 5] = [
 pub(crate) fn model_dir_name(model: &str) -> &'static str {
     match model {
         "reazonspeech" => REAZONSPEECH_DIR_NAME,
+        "haas-ja-v1.0" => HAAS_JA_DIR_NAME,
         "whisper-base" => WHISPER_BASE_DIR_NAME,
         "whisper-small" => WHISPER_SMALL_DIR_NAME,
         "whisper-turbo" => WHISPER_TURBO_DIR_NAME,
@@ -44,8 +47,10 @@ pub(crate) const CONFIG_PATH: &str = "config.toml";
 // ユーザーが CLI / `Config` から変更する値は `Config` に置き、ここには
 // 実装上の固定値 (モデル仕様・無音判定・再試行回数など) を集約する。
 // ---------------------------------------------------------------------------
-/// 推論モデルが要求する特徴量次元。
+/// 既定モデル (SenseVoice / ReazonSpeech / Whisper) の特徴量次元。
 pub(crate) const FEATURE_DIM: i32 = 80;
+/// Haas-ja-v1.0 (NeMo transducer) の特徴量次元。
+pub(crate) const HAAS_FEATURE_DIM: i32 = 128;
 /// greedy/beam 探索で保持するパス数。
 pub(crate) const MAX_ACTIVE_PATHS: i32 = 4;
 /// これ未満のピーク振幅は無音とみなす。
@@ -187,6 +192,7 @@ pub(crate) struct Config {
     pub(crate) model_dir_override: Option<PathBuf>,
     pub(crate) sensevoice_model_dir: PathBuf,
     pub(crate) reazonspeech_model_dir: PathBuf,
+    pub(crate) haas_model_dir: PathBuf,
     pub(crate) whisper_base_model_dir: PathBuf,
     pub(crate) whisper_small_model_dir: PathBuf,
     pub(crate) whisper_turbo_model_dir: PathBuf,
@@ -196,7 +202,8 @@ pub(crate) struct Config {
     pub(crate) use_itn: bool,
     /// ホットワード対応エンジン向けのスコア。現行エンジンでは未使用。
     pub(crate) hotwords_score: f32,
-    /// モデル配布元。空なら公式リリースから直接ダウンロードする。
+    /// モデル配布元。空なら公式配布元 (sherpa-onnx GitHub / Hugging Face) から
+    /// 直接ダウンロードする。
     /// `https://...` または `\\server\share\...` を指定すると社内配布元を使う。
     pub(crate) model_base_url: String,
 
@@ -254,6 +261,7 @@ impl Default for Config {
             model_dir_override: None,
             sensevoice_model_dir: default_model_dir(SENSEVOICE_DIR_NAME),
             reazonspeech_model_dir: default_model_dir(REAZONSPEECH_DIR_NAME),
+            haas_model_dir: default_model_dir(HAAS_JA_DIR_NAME),
             whisper_base_model_dir: default_model_dir(WHISPER_BASE_DIR_NAME),
             whisper_small_model_dir: default_model_dir(WHISPER_SMALL_DIR_NAME),
             whisper_turbo_model_dir: default_model_dir(WHISPER_TURBO_DIR_NAME),
@@ -337,6 +345,7 @@ impl Config {
     pub(crate) fn default_model_dir_for(&self, model: &str) -> PathBuf {
         match model {
             "reazonspeech" => self.reazonspeech_model_dir.clone(),
+            "haas-ja-v1.0" => self.haas_model_dir.clone(),
             "whisper-base" => self.whisper_base_model_dir.clone(),
             "whisper-small" => self.whisper_small_model_dir.clone(),
             "whisper-turbo" => self.whisper_turbo_model_dir.clone(),
@@ -365,7 +374,8 @@ pub(crate) struct Settings {
     pub(crate) sound_volume: f32,
     pub(crate) sound_theme: String,
     pub(crate) floating_bar: bool,
-    /// モデル配布元。空なら公式リリース (GitHub) から直接ダウンロードする。
+    /// モデル配布元。空なら公式配布元 (sherpa-onnx GitHub / Hugging Face) から
+    /// 直接ダウンロードする。
     /// 社内サーバー / 共有フォルダを使う場合に指定する。
     #[serde(default)]
     pub(crate) model_base_url: String,
@@ -520,12 +530,13 @@ pub(crate) struct Cli {
 pub(crate) const HELP: &str = "\
 使い方: BAREVoiceJP [オプション]
 
-SenseVoice / ReazonSpeech / Whisper を使う Push-to-Talk 音声入力 (Windows)
+SenseVoice / ReazonSpeech / Haas-ja / Whisper を使う Push-to-Talk 音声入力 (Windows)
 
 オプション:
   -h, --help                 このヘルプを表示して終了
   --model NAME               推論モデル: sensevoice (既定), reazonspeech,
-                             whisper-base, whisper-small, whisper-turbo
+                             haas-ja-v1.0, whisper-base, whisper-small,
+                             whisper-turbo
   --model-dir DIR            選択したモデルのディレクトリ
   --hotkey KEY               押している間だけ録音するキー (既定: alt_r)
   --paste-modifier MOD       貼り付けの修飾キー (既定: ctrl)
@@ -592,8 +603,8 @@ pub(crate) fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<Cli,
                 let value = take_value("--model")?;
                 if !MODEL_IDS.contains(&value.as_str()) {
                     return Err(format!(
-                        "--model は sensevoice / reazonspeech / whisper-base / \
-                         whisper-small / whisper-turbo のいずれかです: {value}"
+                        "--model は sensevoice / reazonspeech / haas-ja-v1.0 / \
+                         whisper-base / whisper-small / whisper-turbo のいずれかです: {value}"
                     ));
                 }
                 cli.model = Some(value);
@@ -814,6 +825,21 @@ mod tests {
             assert_eq!(config.model, model);
             assert!(config.model_dir_for(model).ends_with(model_dir_name(model)));
         }
+    }
+
+    #[test]
+    fn accepts_haas_model_and_resolves_dir() {
+        let mut config = Config::default();
+        config.apply_cli(
+            &parse_args(["--model".to_string(), "haas-ja-v1.0".to_string()]).expect("有効なモデル"),
+        );
+        assert_eq!(config.model, "haas-ja-v1.0");
+        assert_eq!(config.model_dir_for("haas-ja-v1.0"), config.haas_model_dir);
+        assert!(
+            config
+                .model_dir_for("haas-ja-v1.0")
+                .ends_with(model_dir_name("haas-ja-v1.0"))
+        );
     }
 
     #[test]
