@@ -31,7 +31,7 @@
 | OS | Windows 10 / 11 (x64) |
 | ランタイム | WebView2 Runtime (Windows 11 は標準搭載、Windows 10 は Evergreen 版が必要) |
 | マイク | 入力デバイスが1つ以上 |
-| ディスク | モデル用に 160 MB 〜 2.5 GB |
+| ディスク | モデル用に 160 MB 〜 700 MB（Haas-ja 量子化版は約 480 MB） |
 
 ## インストール
 
@@ -139,14 +139,14 @@ logs/
 |---|---|---|---|---|---|
 | `sensevoice` | SenseVoice | 約 155 MB | 5 | 4 | 日英中韓広東語。既定・推奨 |
 | `reazonspeech` | ReazonSpeech | 約 680 MB | 4 | 5 | 日本語特化。長い発話に強い |
-| `haas-ja-v1.0` | Haas-ja-v1.0 | 約 2.5 GB | 3 | 5 | 日本語特化。高精度だが約 3 GB のメモリを使用 |
+| `haas-ja-v1.0` | Haas-ja-v1.0 | 約 480 MB | 4 | 5 | 日本語特化。int8量子化で軽量・省メモリ |
 | `whisper-base` | Whisper Base | 約 198 MB | 5 | 3 | 軽量・短いメモ向け |
 | `whisper-small` | Whisper Small | 約 610 MB | 3 | 4 | 速度と精度のバランス |
 | `whisper-turbo` | Whisper Turbo | 約 538 MB | 2 | 5 | 高精度。マシンパワーが必要 |
 
-モデル本体はアプリに同梱せず、初回起動後に設定画面の「モデル」タブからダウンロードする。既定では sherpa-onnx 公式リリース (GitHub) から直接取得し、`haas-ja-v1.0` のみ Hugging Face (`oboroge0/Haas-ja-v1.0-onnx`) から取得する。`config.toml` の `model_base_url` を設定すると、社内サーバー（HTTPS または UNC 共有）からの配布に切り替えられる。Whisper は日本語 (`ja`) 固定、SenseVoice は `--language` で切り替えられる。
+モデル本体はアプリに同梱せず、初回起動後に設定画面の「モデル」タブからダウンロードする。既定では sherpa-onnx 公式リリース (GitHub) から直接取得し、`haas-ja-v1.0` のみ Hugging Face (`oboroge0/Haas-ja-v1.0-onnx-quantized`) から取得する。`config.toml` の `model_base_url` を設定すると、社内サーバー（HTTPS または UNC 共有）からの配布に切り替えられる。Whisper は日本語 (`ja`) 固定、SenseVoice は `--language` で切り替えられる。
 
-`haas-ja-v1.0` は ONNX Runtime の外部データを使うため、`encoder.onnx` と `encoder.data` を同じディレクトリに置く必要がある（設定画面からのダウンロードでは自動的に揃う）。
+`haas-ja-v1.0` は int8/4bit 量子化版で、`encoder.quantized.onnx` と外部データ `encoder.data` を同じディレクトリに置く必要がある（設定画面からのダウンロードでは自動的に揃う）。旧 fp32 版の `encoder.onnx` が既にある場合もそのまま起動できるが、軽量化するにはモデルを削除して再ダウンロードする。
 
 ### 配布元の切り替え（社内サーバー / 共有フォルダ）
 
@@ -199,14 +199,14 @@ model_base_url = 'D:\BAREVoiceJP\models'
   sherpa-onnx-whisper-base.tar.bz2
   sherpa-onnx-whisper-small.tar.bz2
   sherpa-onnx-whisper-turbo.tar.bz2
-  encoder.onnx
+  encoder.quantized.onnx
   encoder.data
   decoder.onnx
   joiner.onnx
   tokens.txt
 ```
 
-`encoder.onnx` 〜 `tokens.txt` は `haas-ja-v1.0` 用。`encoder.onnx` と `encoder.data` は必ず同じディレクトリに置く。
+`encoder.quantized.onnx` 〜 `tokens.txt` は `haas-ja-v1.0` の量子化版用。`encoder.quantized.onnx` と `encoder.data` は必ず同じディレクトリに置く。
 
 `checksums.sha256` は `sha256sum` 互換形式（`<64桁の16進>␠␠<ファイル名>`）。`#` 行と `*` 付きファイル名、`models/foo.tar.bz2` のようなパス表記も受け付ける。
 
@@ -214,8 +214,8 @@ model_base_url = 'D:\BAREVoiceJP\models'
 # BAREVoiceJP models
 7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e  sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2
 911b2083efd7c0dca2ac3b358b75222660dc09fb716d64fbfc417ba6c99ff3de  sherpa-onnx-whisper-base.tar.bz2
-8e34e59e7a2dff1dbda2d91c4ba1d9673f976da74db25597883a185088300757  encoder.onnx
-7aa9d630b66a2317f615c7094c201ca1049d3b14b0a2515f42a8eea0c17e410a  encoder.data
+aba291d61d3d594bc6fb8c7f90acbd980e7bc7bf6b7caaf3965ddc25e6f42fac  encoder.quantized.onnx
+30befbf6aeb75383e6551f5e58de53efdb76972ddc7d0f76070c517899873586  encoder.data
 2947cb5512699cbba753fe45fe221428aadaa9856597debbb7aabe19cc253622  decoder.onnx
 8a68320e750890ff9e944a794b41ae1c42c6f439ac4c273503458a6b42adc12d  joiner.onnx
 ec78b13c5d9f156cf0d5fdbd6b5aec5785680f319c92630c11d5d11b14b83a84  tokens.txt
@@ -227,7 +227,7 @@ ec78b13c5d9f156cf0d5fdbd6b5aec5785680f319c92630c11d5d11b14b83a84  tokens.txt
 Get-ChildItem .\*.tar.bz2 | Get-FileHash -Algorithm SHA256 |
   ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
   Set-Content -Encoding ascii checksums.sha256
-Get-ChildItem .\encoder.onnx, .\encoder.data, .\decoder.onnx, .\joiner.onnx, .\tokens.txt |
+Get-ChildItem .\encoder.quantized.onnx, .\encoder.data, .\decoder.onnx, .\joiner.onnx, .\tokens.txt |
   Get-FileHash -Algorithm SHA256 |
   ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
   Add-Content -Encoding ascii checksums.sha256
@@ -236,7 +236,7 @@ Get-ChildItem .\encoder.onnx, .\encoder.data, .\decoder.onnx, .\joiner.onnx, .\t
 生成例（Linux / WSL）:
 
 ```bash
-sha256sum *.tar.bz2 encoder.onnx encoder.data decoder.onnx joiner.onnx tokens.txt > checksums.sha256
+sha256sum *.tar.bz2 encoder.quantized.onnx encoder.data decoder.onnx joiner.onnx tokens.txt > checksums.sha256
 ```
 
 **注意**: ハッシュは実際に配布するアーカイブのバイト列に対して計算する。再圧縮・再パッケージした場合は必ず再生成する。ハッシュは HTTPS または共有 ACL で保護された経路で取得する前提（マニフェスト自体の改ざん対策は経路の信頼に依存する）。

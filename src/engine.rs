@@ -623,36 +623,41 @@ fn resolve_reazonspeech_files(dir: &Path) -> Result<(PathBuf, PathBuf, PathBuf, 
 
 /// Haas-ja (NeMo transducer) の encoder/decoder/joiner/tokens を探す。
 ///
-/// `encoder.onnx` は外部データ `encoder.data` を参照するため、同じ
-/// ディレクトリに存在することも確認する。
+/// 量子化版の `encoder.quantized.onnx` を優先し、旧 fp32 版の
+/// `encoder.onnx` もフォールバックとして受け付ける。どちらも外部データ
+/// `encoder.data` を参照するため、同じディレクトリに存在することも確認する。
 fn resolve_haas_files(dir: &Path) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf), String> {
     let base = if dir.is_file() {
         dir.parent().unwrap_or(Path::new(".")).to_path_buf()
     } else {
         dir.to_path_buf()
     };
-    let encoder = base.join("encoder.onnx");
+    let encoder = ["encoder.quantized.onnx", "encoder.onnx"]
+        .iter()
+        .map(|name| base.join(name))
+        .find(|path| path.is_file());
     let encoder_data = base.join("encoder.data");
     let decoder = base.join("decoder.onnx");
     let joiner = base.join("joiner.onnx");
     let tokens = base.join("tokens.txt");
-    let expected = [
-        ("encoder", &encoder),
+
+    let mut missing = Vec::new();
+    if encoder.is_none() {
+        missing.push("encoder.quantized.onnx (または encoder.onnx)".to_string());
+    }
+    for (name, path) in [
         ("encoder.data", &encoder_data),
         ("decoder", &decoder),
         ("joiner", &joiner),
         ("tokens", &tokens),
-    ];
-    let missing: Vec<String> = expected
-        .iter()
-        .filter(|(_, path)| !path.is_file())
-        .map(|(name, path)| {
-            format!(
+    ] {
+        if !path.is_file() {
+            missing.push(format!(
                 "{name}: {}",
                 path.file_name().unwrap_or_default().to_string_lossy()
-            )
-        })
-        .collect();
+            ));
+        }
+    }
     if !missing.is_empty() {
         return Err(format!(
             "Haas-ja モデルが見つかりません: {}\n\
@@ -663,7 +668,12 @@ fn resolve_haas_files(dir: &Path) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf)
             missing.join(", ")
         ));
     }
-    Ok((encoder, decoder, joiner, tokens))
+    Ok((
+        encoder.expect("encoder の存在を確認済み"),
+        decoder,
+        joiner,
+        tokens,
+    ))
 }
 
 /// Whisper の encoder / decoder / tokens を探す。
@@ -988,12 +998,17 @@ mod tests {
     }
 
     #[test]
-    fn resolves_haas_files_requires_external_data() {
+    fn resolves_haas_files_prefers_quantized_encoder() {
         let dir =
             std::env::temp_dir().join(format!("BAREVoiceJP-haas-resolve-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("一時ディレクトリ作成");
-        for name in ["encoder.onnx", "decoder.onnx", "joiner.onnx", "tokens.txt"] {
+        for name in [
+            "encoder.quantized.onnx",
+            "decoder.onnx",
+            "joiner.onnx",
+            "tokens.txt",
+        ] {
             fs::write(dir.join(name), b"").expect("ダミーファイル作成");
         }
 
@@ -1003,10 +1018,16 @@ mod tests {
         fs::write(dir.join("encoder.data"), b"").expect("外部データ作成");
         let (encoder, decoder, joiner, tokens) =
             resolve_haas_files(&dir).expect("Haas ファイル解決");
-        assert!(encoder.ends_with("encoder.onnx"));
+        assert!(encoder.ends_with("encoder.quantized.onnx"));
         assert!(decoder.ends_with("decoder.onnx"));
         assert!(joiner.ends_with("joiner.onnx"));
         assert!(tokens.ends_with("tokens.txt"));
+
+        // 旧 fp32 版の encoder.onnx だけでもフォールバックで解決できる。
+        fs::remove_file(dir.join("encoder.quantized.onnx")).expect("量子化版を削除");
+        fs::write(dir.join("encoder.onnx"), b"").expect("旧 encoder 作成");
+        let (encoder, _, _, _) = resolve_haas_files(&dir).expect("旧 Haas ファイル解決");
+        assert!(encoder.ends_with("encoder.onnx"));
 
         let _ = fs::remove_dir_all(&dir);
     }

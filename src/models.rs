@@ -60,14 +60,14 @@ fn http_agent(body_timeout: Duration) -> ureq::Agent {
 ///
 /// ureq の TLS プロバイダは既定で Rustls だが、本クレートは native-tls のみを
 /// 有効にしている。プロバイダを明示しないと HTTPS 接続時に ureq が panic する。
-/// Haas-ja の `encoder.data` は約 2.4 GB あるため、本文の総時間を長めに取る。
+/// Haas-ja 量子化版の `encoder.data` は約 410 MB あるため、本文の総時間を長めに取る。
 static HTTP: LazyLock<ureq::Agent> = LazyLock::new(|| http_agent(Duration::from_secs(2 * 60 * 60)));
 
 /// マニフェスト用。本文が小さいので短いタイムアウトにする。
 static HTTP_MANIFEST: LazyLock<ureq::Agent> = LazyLock::new(|| http_agent(Duration::from_secs(30)));
-
-/// Haas-ja-v1.0 の公式配布元 (Hugging Face)。
-const HAAS_JA_OFFICIAL: &str = "https://huggingface.co/oboroge0/Haas-ja-v1.0-onnx/resolve/main";
+/// Haas-ja-v1.0 (int8/4bit 量子化) の公式配布元 (Hugging Face)。
+const HAAS_JA_OFFICIAL: &str =
+    "https://huggingface.co/oboroge0/Haas-ja-v1.0-onnx-quantized/resolve/main";
 
 /// 直接配置するファイル 1 つ分の定義。
 struct RemoteFile {
@@ -78,20 +78,20 @@ struct RemoteFile {
     sha256: &'static str,
 }
 
-/// Haas-ja-v1.0 の配布ファイル。
+/// Haas-ja-v1.0 量子化版の配布ファイル。
 ///
-/// `encoder.onnx` は外部データ `encoder.data` を参照するため、必ず同一
-/// ディレクトリへ配置する。
+/// `encoder.quantized.onnx` は外部データ `encoder.data` を参照するため、
+/// 必ず同一ディレクトリへ配置する。
 const HAAS_JA_FILES: [RemoteFile; 5] = [
     RemoteFile {
-        name: "encoder.onnx",
-        size: 41_836_973,
-        sha256: "8e34e59e7a2dff1dbda2d91c4ba1d9673f976da74db25597883a185088300757",
+        name: "encoder.quantized.onnx",
+        size: 42_261_252,
+        sha256: "aba291d61d3d594bc6fb8c7f90acbd980e7bc7bf6b7caaf3965ddc25e6f42fac",
     },
     RemoteFile {
         name: "encoder.data",
-        size: 2_435_420_160,
-        sha256: "7aa9d630b66a2317f615c7094c201ca1049d3b14b0a2515f42a8eea0c17e410a",
+        size: 410_744_064,
+        sha256: "30befbf6aeb75383e6551f5e58de53efdb76972ddc7d0f76070c517899873586",
     },
     RemoteFile {
         name: "decoder.onnx",
@@ -184,13 +184,13 @@ pub(crate) const SPECS: [ModelSpec; 6] = [
     ModelSpec {
         id: "haas-ja-v1.0",
         name: "Haas-ja-v1.0",
-        subtitle: "日本語特化。高精度だが約 2.7 GB のメモリを使用。",
+        subtitle: "日本語特化。int8量子化で軽量・省メモリ。",
         package: Package::Files {
             official_base: HAAS_JA_OFFICIAL,
             files: &HAAS_JA_FILES,
         },
-        size_label: "約 2.5 GB",
-        speed: 3,
+        size_label: "約 480 MB",
+        speed: 4,
         accuracy: 5,
         recommended: false,
     },
@@ -588,9 +588,23 @@ fn installed_at(dir: &Path, id: &str) -> bool {
     if let Some(spec) = spec(id)
         && let Package::Files { files, .. } = &spec.package
     {
-        return files
-            .iter()
-            .all(|file| names.iter().any(|name| name.as_str() == file.name));
+        let installed = |name: &str| names.iter().any(|entry| entry.as_str() == name);
+        if files.iter().all(|file| installed(file.name)) {
+            return true;
+        }
+        // 旧 fp32 版 Haas-ja (`encoder.onnx` + 約2.4GB の `encoder.data`) が
+        // 既にある場合は、そのままでも起動できるようインストール済みとして扱う。
+        if id == "haas-ja-v1.0" {
+            return files.iter().all(|file| {
+                let name = if file.name == "encoder.quantized.onnx" {
+                    "encoder.onnx"
+                } else {
+                    file.name
+                };
+                installed(name)
+            });
+        }
+        return false;
     }
     match id {
         "sensevoice" => {
@@ -897,8 +911,8 @@ fn run_file_download(id: &str, spec: &ModelSpec, dest: &Path, source: &Source) {
 
 /// `.part` を付けた一時パス。
 ///
-/// `with_extension` は `encoder.onnx` と `encoder.data` を同じ名前にして
-/// しまうため、拡張子を保ったまま末尾へ足す。
+/// `with_extension` は `encoder.quantized.onnx` と `encoder.data` を同じ名前に
+/// してしまうため、拡張子を保ったまま末尾へ足す。
 fn part_path(path: &Path) -> PathBuf {
     let mut part = path.as_os_str().to_os_string();
     part.push(".part");
@@ -1240,8 +1254,12 @@ mod tests {
         );
         let haas = spec("haas-ja-v1.0").expect("Haas の定義");
         assert_eq!(
-            Source::Official.file_url(haas, "encoder.onnx").as_deref(),
-            Some("https://huggingface.co/oboroge0/Haas-ja-v1.0-onnx/resolve/main/encoder.onnx")
+            Source::Official
+                .file_url(haas, "encoder.quantized.onnx")
+                .as_deref(),
+            Some(
+                "https://huggingface.co/oboroge0/Haas-ja-v1.0-onnx-quantized/resolve/main/encoder.quantized.onnx"
+            )
         );
         assert!(Source::parse("relative/models").is_err());
         assert!(Source::parse("htps://typo/models").is_err());
@@ -1508,7 +1526,7 @@ BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  models/other.t
         fs::create_dir_all(&source_dir).expect("source");
 
         let payloads = [
-            ("encoder.onnx", b"encoder".as_slice()),
+            ("encoder.quantized.onnx", b"encoder".as_slice()),
             ("encoder.data", b"external data".as_slice()),
             ("decoder.onnx", b"decoder".as_slice()),
             ("joiner.onnx", b"joiner".as_slice()),
@@ -1516,7 +1534,7 @@ BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  models/other.t
         ];
         let files: &'static [RemoteFile] = &[
             RemoteFile {
-                name: "encoder.onnx",
+                name: "encoder.quantized.onnx",
                 size: 7,
                 sha256: "",
             },
@@ -1598,6 +1616,31 @@ BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  models/other.t
             assert!(spec(id).is_some(), "{id}");
         }
         assert_eq!(SPECS.len(), config::MODEL_IDS.len());
+    }
+
+    #[test]
+    fn recognizes_quantized_and_legacy_haas_layouts() {
+        let dir = temp_dir("haas-installed");
+        for name in [
+            "encoder.quantized.onnx",
+            "encoder.data",
+            "decoder.onnx",
+            "joiner.onnx",
+            "tokens.txt",
+        ] {
+            fs::write(dir.join(name), b"").expect("ダミーファイル作成");
+        }
+        assert!(installed_at(&dir, "haas-ja-v1.0"));
+
+        fs::remove_file(dir.join("encoder.data")).expect("外部データ削除");
+        assert!(!installed_at(&dir, "haas-ja-v1.0"));
+
+        fs::write(dir.join("encoder.data"), b"").expect("外部データ作成");
+        fs::remove_file(dir.join("encoder.quantized.onnx")).expect("量子化版削除");
+        fs::write(dir.join("encoder.onnx"), b"").expect("旧 encoder 作成");
+        assert!(installed_at(&dir, "haas-ja-v1.0"));
+
+        fs::remove_dir_all(dir).expect("後片付け");
     }
 
     #[test]
