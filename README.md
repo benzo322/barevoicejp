@@ -30,18 +30,21 @@
 |---|---|
 | OS | Windows 10 / 11 (x64) |
 | ランタイム | WebView2 Runtime (Windows 11 は標準搭載、Windows 10 は Evergreen 版が必要) |
+| ランタイム | Microsoft Visual C++ 2015-2022 再頒布可能パッケージ (x64)。多くの環境では導入済み |
 | マイク | 入力デバイスが1つ以上 |
 | ディスク | モデル用に 160 MB 〜 700 MB（Haas-ja 量子化版は約 480 MB） |
 
 ## インストール
 
-[Releases](../../releases) の `BAREVoiceJP_Setup.exe` を実行する。管理者権限は不要で、`%LOCALAPPDATA%\Programs\BAREVoiceJP` にインストールされる。
+[Releases](../../releases) の `BAREVoiceJP-vX.Y.Z-win64.zip` を任意のフォルダへ展開し、`BAREVoiceJP.exe` を実行する。管理者権限は不要。ZIP を展開したフォルダが、そのまま設定・辞書・モデル・ログの保存先になる。
 
-1. 初回起動でオンボーディングが表示される
-2. 使用するモデルを選択してダウンロード (進捗は設定画面に表示)
+1. ZIP を展開する
+2. `BAREVoiceJP.exe` を起動し、オンボーディングで使用するモデルを選択してダウンロードする (進捗は設定画面に表示)
 3. 右 Alt を押しながら話し、離すとテキストが貼り付く
 
-アンインストールは「アプリと機能」またはスタートメニューの `Uninstall BAREVoiceJP` から。
+SmartScreen の警告が出た場合は「詳細情報」→「実行」を選ぶ。詳しい手順と SHA256 の確認方法は、ZIP 同梱の `README.txt` を参照。
+
+アンインストールは、設定画面で自動起動をオフにしたうえでアプリを終了し、展開したフォルダを削除する。
 
 ## ソースからビルド
 
@@ -77,6 +80,17 @@ iscc installer.iss
 ```
 
 `Output\BAREVoiceJP_Setup.exe` が生成される。インストーラは `target\release\BAREVoiceJP.exe` と `*.dll`、辞書テンプレート (`words.txt` / `replacements.json`) を同梱する。辞書はアップグレード時に上書きしない (`onlyifdoesntexist`)。
+
+### リリース
+
+`.github/workflows/release.yml` が `v*` タグの push (または手動実行) で Windows x64 向けの配布 ZIP をビルドし、GitHub Release に添付する。処理内容は次のとおり。
+
+- sherpa-onnx v1.13.8 の Windows x64 Release を取得し、SHA256 を検証して展開
+- `cargo build --release --locked`
+- `BAREVoiceJP/` に exe・DLL・辞書テンプレート・`LICENSE`・`README.txt`・`THIRD-PARTY-LICENSES.txt` を格納
+- `BAREVoiceJP-<tag>-win64.zip` と `.sha256` を生成してリリースに添付
+
+タグと `Cargo.toml` の `version` は一致している必要がある。モデル本体は同梱しない。
 
 ## 使い方
 
@@ -444,6 +458,10 @@ src/
 tests/text_cases.json   テキスト整形の評価ケース
 tools/make_icon.py      アイコン生成スクリプト
 voice_input.py          旧 Python プロトタイプ (実行時には不要)
+docs/release/README.txt                 配布 ZIP 同梱の利用者向け README
+docs/release/THIRD-PARTY-LICENSES.txt   第三者ライセンス表記
+.github/workflows/release.yml           Windows リリース自動化
+LICENSE                                  MIT License
 ```
 
 `voice_input.py` は Rust 版以前のクロスプラットフォーム・プロトタイプで、整形ロジックの移植元。Windows アプリのビルドや実行には使わない。
@@ -452,10 +470,10 @@ voice_input.py          旧 Python プロトタイプ (実行時には不要)
 
 - Windows x64 専用 (Win32 API と sherpa-onnx の DLL に依存)
 - 貼り付けは `Ctrl+V` 固定
-- モデル本体はリポジトリにもインストーラにも含まれない (初回起動時に取得)
+- モデル本体はリポジトリにも配布 ZIP にも含まれない (初回起動時に取得)
 
 ## ライセンス
 
-現時点でライセンスファイルは置いていない (社内配布用)。
+MIT License。全文は [LICENSE](LICENSE) を参照。
 
-同梱・依存する外部コンポーネントにはそれぞれのライセンスが適用される: sherpa-onnx、ONNX Runtime、WebView2 Runtime、および各 ASR モデル。再配布する場合は各モデルのライセンスを確認すること。
+同梱・依存する外部コンポーネントにはそれぞれのライセンスが適用される。配布 ZIP には [THIRD-PARTY-LICENSES.txt](docs/release/THIRD-PARTY-LICENSES.txt) を同梱している。sherpa-onnx (Apache-2.0)、ONNX Runtime (MIT)、WebView2 Runtime (Microsoft)、Rust クレート、および各 ASR モデル。モデル本体は同梱していないため、再配布する場合は各モデルのライセンスを確認すること。

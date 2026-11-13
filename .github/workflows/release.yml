@@ -1,0 +1,321 @@
+name: Release (Windows x64)
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '既存のリリースタグ (例: v0.1.5)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  SHERPA_VERSION: v1.13.8
+  SHERPA_DIR: sherpa-onnx-v1.13.8-win-x64-shared-MD-Release
+  # https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/
+  #   sherpa-onnx-v1.13.8-win-x64-shared-MD-Release.tar.bz2
+  SHERPA_SHA256: 3e971a04b2e0ba4dfa53d381a006367ce8c9f5f09b4ae00043e9845c2baded22
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 手動実行時は指定されたタグを、タグ push 時はそのタグをビルドする。
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+
+      - name: Resolve and validate release tag
+        id: tag
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = if ($env:EVENT_NAME -eq 'workflow_dispatch') {
+            "$env:INPUT_TAG".Trim()
+          } else {
+            $env:REF_NAME
+          }
+
+          if (-not ($tag -match '^v\d+\.\d+\.\d+([+-][0-9A-Za-z.-]+)?$')) {
+            throw "リリースタグは v<major>.<minor>.<patch> 形式にしてください: '$tag'"
+          }
+
+          $cargoToml = Get-Content -Raw -LiteralPath 'Cargo.toml'
+          if (-not ($cargoToml -match '(?m)^version\s*=\s*"([^"]+)"')) {
+            throw 'Cargo.toml からバージョンを取得できませんでした'
+          }
+          $cargoVersion = $Matches[1]
+          $tagVersion = $tag.Substring(1) -replace '[-+].*$', ''
+          if ($cargoVersion -ne $tagVersion) {
+            throw "タグ '$tag' と Cargo.toml のバージョン '$cargoVersion' が一致しません"
+          }
+
+          $utf8 = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "RELEASE_TAG=$tag`n", $utf8)
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "tag=$tag`n", $utf8)
+          Write-Host "Release tag: $tag (Cargo.toml: $cargoVersion)"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      # ビルド自体は Python を使わないが、リポジトリ内の補助スクリプト用に
+      # 明示的に Python 3.12 を用意しておく。
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download and verify sherpa-onnx
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'sherpa-onnx-win-x64.tar.bz2'
+          $url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/${env:SHERPA_VERSION}/${env:SHERPA_DIR}.tar.bz2"
+
+          Write-Host "Downloading $url"
+          curl.exe -L --fail --retry 3 --retry-delay 2 --output $archive $url
+          if ($LASTEXITCODE -ne 0) {
+            throw "sherpa-onnx のダウンロードに失敗しました: $url"
+          }
+
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = $env:SHERPA_SHA256.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "sherpa-onnx の SHA256 が一致しません: expected=$expected actual=$actual"
+          }
+
+          tar.exe -xjf $archive -C $env:GITHUB_WORKSPACE
+          if ($LASTEXITCODE -ne 0) {
+            throw 'sherpa-onnx の展開に失敗しました'
+          }
+
+          $required = @(
+            'lib\sherpa-onnx-c-api.lib',
+            'lib\sherpa-onnx-c-api.dll',
+            'lib\onnxruntime.dll',
+            'lib\onnxruntime_providers_shared.dll'
+          )
+          foreach ($item in $required) {
+            $path = Join-Path $env:SHERPA_DIR $item
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "sherpa-onnx の必須ファイルがありません: $path"
+            }
+          }
+
+      - name: Build release executable
+        run: cargo build --release --locked
+
+      - name: Build distribution folder
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location $env:GITHUB_WORKSPACE
+
+          $stage = Join-Path $env:GITHUB_WORKSPACE 'BAREVoiceJP'
+          if (Test-Path -LiteralPath $stage) {
+            Remove-Item -LiteralPath $stage -Recurse -Force
+          }
+          New-Item -ItemType Directory -Path $stage | Out-Null
+
+          $files = @(
+            'target\release\BAREVoiceJP.exe',
+            'target\release\sherpa-onnx-c-api.dll',
+            'target\release\onnxruntime.dll',
+            'target\release\onnxruntime_providers_shared.dll',
+            'words.txt',
+            'replacements.json',
+            'hotwords.txt',
+            'LICENSE',
+            'docs\release\README.txt',
+            'docs\release\THIRD-PARTY-LICENSES.txt'
+          )
+          foreach ($file in $files) {
+            if (-not (Test-Path -LiteralPath $file)) {
+              throw "配布物が見つかりません: $file"
+            }
+            Copy-Item -LiteralPath $file -Destination $stage
+          }
+
+          $expected = @(
+            'BAREVoiceJP.exe',
+            'sherpa-onnx-c-api.dll',
+            'onnxruntime.dll',
+            'onnxruntime_providers_shared.dll',
+            'words.txt',
+            'replacements.json',
+            'hotwords.txt',
+            'LICENSE',
+            'README.txt',
+            'THIRD-PARTY-LICENSES.txt'
+          )
+          foreach ($name in $expected) {
+            if (-not (Test-Path -LiteralPath (Join-Path $stage $name))) {
+              throw "配布フォルダに必須ファイルがありません: $name"
+            }
+          }
+
+          # 実行時データや機密情報を含むファイルが混入していないことを確認する。
+          $forbidden = @('config.toml', 'history.json', 'stats.json', 'logs', 'models')
+          foreach ($name in $forbidden) {
+            if (Test-Path -LiteralPath (Join-Path $stage $name)) {
+              throw "配布フォルダに含めてはいけない項目があります: $name"
+            }
+          }
+
+      - name: Create ZIP and SHA256
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location $env:GITHUB_WORKSPACE
+
+          $zip = "BAREVoiceJP-$env:RELEASE_TAG-win64.zip"
+          if (Test-Path -LiteralPath $zip) {
+            Remove-Item -LiteralPath $zip -Force
+          }
+          Compress-Archive -Path (Join-Path $env:GITHUB_WORKSPACE 'BAREVoiceJP') `
+            -DestinationPath $zip -CompressionLevel Optimal
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead(
+            (Join-Path $env:GITHUB_WORKSPACE $zip)
+          )
+          try {
+            $entries = $archive.Entries.FullName
+            $required = @(
+              'BAREVoiceJP/BAREVoiceJP.exe',
+              'BAREVoiceJP/sherpa-onnx-c-api.dll',
+              'BAREVoiceJP/onnxruntime.dll',
+              'BAREVoiceJP/onnxruntime_providers_shared.dll',
+              'BAREVoiceJP/words.txt',
+              'BAREVoiceJP/replacements.json',
+              'BAREVoiceJP/hotwords.txt',
+              'BAREVoiceJP/LICENSE',
+              'BAREVoiceJP/README.txt',
+              'BAREVoiceJP/THIRD-PARTY-LICENSES.txt'
+            )
+            foreach ($item in $required) {
+              if ($entries -notcontains $item) {
+                throw "ZIP に必須ファイルがありません: $item"
+              }
+            }
+          } finally {
+            $archive.Dispose()
+          }
+
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          $shaFile = "$zip.sha256"
+          $utf8 = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::WriteAllText(
+            (Join-Path $env:GITHUB_WORKSPACE $shaFile),
+            "$hash  $zip`n",
+            $utf8
+          )
+
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "package=$zip`n", $utf8)
+          [System.IO.File]::AppendAllText($env:GITHUB_OUTPUT, "sha256=$hash`n", $utf8)
+          Write-Host "Created $zip"
+          Write-Host "SHA256: $hash"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: BAREVoiceJP ${{ steps.tag.outputs.tag }}
+          prerelease: ${{ contains(steps.tag.outputs.tag, '-') }}
+          body: |
+            ## BAREVoiceJP ${{ steps.tag.outputs.tag }} (Windows x64)
+
+            Windows 10 / 11 (x64) 向けの配布 ZIP です。
+            モデル本体は同梱していません。初回起動後に設定画面から
+            ダウンロードしてください。
+
+            ### ダウンロード
+
+            - `BAREVoiceJP-${{ steps.tag.outputs.tag }}-win64.zip`
+            - `BAREVoiceJP-${{ steps.tag.outputs.tag }}-win64.zip.sha256`
+
+            ### 使い方
+
+            1. ZIP を任意のフォルダへ展開します。
+            2. `BAREVoiceJP.exe` を実行します。
+            3. 初回起動時のオンボーディングでモデルを選択し、
+               ダウンロードします。
+            4. 右 Alt を押しながら話し、離すと認識結果が貼り付きます。
+
+            設定画面はタスクトレイのアイコンを右クリック →「設定」から
+            開けます。詳細は同梱の `README.txt` を参照してください。
+
+            ### Windows SmartScreen の警告が出た場合
+
+            本ビルドはコード署名されていません。
+
+            - ZIP: 右クリック →「プロパティ」→「ブロックの解除」に
+              チェック →「OK」→ 展開
+            - exe: 「Windows によって PC が保護されました」と表示されたら
+              「詳細情報」→「実行」
+
+            SmartScreen や Microsoft Defender を無効化する必要はありません。
+            実行前に配布元と SHA256 を確認してください。
+
+            ### SHA256 の確認
+
+            PowerShell:
+
+            ```powershell
+            Get-FileHash .\BAREVoiceJP-${{ steps.tag.outputs.tag }}-win64.zip -Algorithm SHA256
+            ```
+
+            コマンドプロンプト:
+
+            ```bat
+            certutil -hashfile BAREVoiceJP-${{ steps.tag.outputs.tag }}-win64.zip SHA256
+            ```
+
+            このリリースの SHA256:
+
+            ```text
+            ${{ steps.package.outputs.sha256 }}
+            ```
+
+            値が一致しない場合は実行しないでください。
+
+            ### 動作環境
+
+            - Windows 10 / 11 (x64)
+            - Microsoft Edge WebView2 Runtime
+              (Windows 11 は標準搭載。Windows 10 は Evergreen 版が必要)
+            - マイク入力デバイス
+
+            ### 同梱物
+
+            - `BAREVoiceJP.exe`
+            - `sherpa-onnx-c-api.dll`
+            - `onnxruntime.dll`
+            - `onnxruntime_providers_shared.dll`
+            - `words.txt` / `replacements.json` / `hotwords.txt`
+            - `LICENSE`
+            - `README.txt`
+            - `THIRD-PARTY-LICENSES.txt`
+
+          files: |
+            ${{ steps.package.outputs.package }}
+            ${{ steps.package.outputs.package }}.sha256
+          fail_on_unmatched_files: true
+          overwrite_files: true
