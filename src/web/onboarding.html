@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; base-uri 'none'; form-action 'none'; connect-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'none'">
 <title>BAREVoiceJP — ようこそ</title>
 <style>
   :root{
@@ -265,7 +266,7 @@
         </div>
         <div class="memo">
           <p>Copilotと壁打ちするとき、キーボードで打つのが普通にめんどくさくなったのが始まり。</p>
-          <p>世の中の音声入力アプリって、月額サブスク取られるし音声データは勝手にネットに飛んでいくしで社内の仕事じゃ使いづらい。かといって無料のローカルツールは推論が重くて、キー離してから文字が出るまで数秒待たされて思考が止まる。</p>
+          <p>世の中の音声入力アプリって、月額サブスク取られるし音声データは勝手にネットに飛んでいくしで実務や普段の作業では使いづらい。かといって無料のローカルツールは推論が重くて、キー離してから文字が出るまで数秒待たされて思考が止まる。</p>
           <p>そもそも相手はCopilotなんだから、手元のツールで綺麗に清書する必要なんてない。文脈はあっちが勝手に忖度して読んでくれるしね。</p>
           <p>だから「ネットに一切出ない完全ローカル」で「ホットキー離したら0.2秒で思考がそのまま貼り付く」やつを作りました。</p>
           <p>綺麗に喋ろうとせず、頭の中のモヤモヤをそのまましゃべってください。copilotとの距離が近くなるはず。</p>
@@ -333,30 +334,5 @@
     </button>
   </footer>
 </div>
-
-<script>
-(function () {
-  var button = document.getElementById("startButton");
-  var sent = false;
-
-  function finish() {
-    if (sent) return;
-    sent = true;
-    button.disabled = true;
-    if (!window.ipc) {
-      sent = false;
-      button.disabled = false;
-      return;
-    }
-    window.ipc.postMessage(JSON.stringify({ cmd: "get_started" }));
-  }
-
-  button.addEventListener("click", finish);
-  document.addEventListener("keydown", function (event) {
-    if (event.key === "Enter" && !event.repeat) finish();
-  });
-  button.focus();
-})();
-</script>
 </body>
 </html>

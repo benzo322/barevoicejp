@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  SHERPA_VERSION: v1.13.8
+  SHERPA_DIR: sherpa-onnx-v1.13.8-win-x64-shared-MD-Release
+  # https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/
+  #   sherpa-onnx-v1.13.8-win-x64-shared-MD-Release.tar.bz2
+  SHERPA_SHA256: 3e971a04b2e0ba4dfa53d381a006367ce8c9f5f09b4ae00043e9845c2baded22
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      # build.rs が sherpa-onnx のインポートライブラリを要求するため、
+      # テストのコンパイル前に SDK を配置する。
+      - name: Download and verify sherpa-onnx
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'sherpa-onnx-win-x64.tar.bz2'
+          $url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/${env:SHERPA_VERSION}/${env:SHERPA_DIR}.tar.bz2"
+
+          Write-Host "Downloading $url"
+          curl.exe -L --fail --retry 3 --retry-delay 2 --output $archive $url
+          if ($LASTEXITCODE -ne 0) {
+            throw "sherpa-onnx のダウンロードに失敗しました: $url"
+          }
+
+          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = $env:SHERPA_SHA256.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "sherpa-onnx の SHA256 が一致しません: expected=$expected actual=$actual"
+          }
+
+          tar.exe -xjf $archive -C $env:GITHUB_WORKSPACE
+          if ($LASTEXITCODE -ne 0) {
+            throw 'sherpa-onnx の展開に失敗しました'
+          }
+
+          $sherpaLib = Join-Path $env:GITHUB_WORKSPACE (Join-Path $env:SHERPA_DIR 'lib')
+          foreach ($item in @(
+            'sherpa-onnx-c-api.lib',
+            'sherpa-onnx-c-api.dll',
+            'onnxruntime.dll',
+            'onnxruntime_providers_shared.dll'
+          )) {
+            $path = Join-Path $sherpaLib $item
+            if (-not (Test-Path -LiteralPath $path)) {
+              throw "sherpa-onnx の必須ファイルがありません: $path"
+            }
+          }
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked

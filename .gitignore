@@ -1,6 +1,5 @@
 # Rust / ビルド成果物
 /target/
-Cargo.lock
 
 # インストーラー出力・配布用バイナリ
 /Output/

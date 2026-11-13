@@ -1,6 +1,6 @@
 //! テキスト整形と辞書ファイル。
 //!
-//! `voice_input.py` の `TextFormatter` / `load_words` /
+//! 旧 Python 実装の `TextFormatter` / `load_words` /
 //! `load_external_replacements` を移植。タグ除去、空白正規化、
 //! replacements.json の完全一致置換、words.txt のファジー置換、
 //! 英日境界のスペース補正を同じ順序で適用する。
@@ -788,14 +788,10 @@ fn ends_with_boundary_particle(text: &[char], end: usize) -> bool {
 
 /// 文字スライスの `start` 位置が `prefix` で始まるか。
 fn char_starts_with(text: &[char], start: usize, prefix: &str) -> bool {
-    let mut index = start;
-    for expected in prefix.chars() {
-        if text.get(index) != Some(&expected) {
-            return false;
-        }
-        index += 1;
-    }
-    true
+    prefix
+        .chars()
+        .enumerate()
+        .all(|(offset, expected)| text.get(start.saturating_add(offset)) == Some(&expected))
 }
 
 /// `<|...|>` 形式のモデルタグを除去する。
@@ -1082,7 +1078,7 @@ mod tests {
         assert_eq!(f.format("あい"), "AI");
     }
 
-    /// `voice_input.py` の TextFormatter が出した結果との一致を確認する。
+    /// 移植元の Python 実装が出した結果との一致を確認する。
     #[test]
     fn matches_reference_text_formatter() {
         let words = load_words(Path::new(WORDS_PATH));

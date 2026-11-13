@@ -531,12 +531,9 @@ $("#wordList").addEventListener("click", event => {
 $("#historyList").addEventListener("click", event => {
   const button = event.target.closest("button[data-copy-history]");
   if (!button) return;
-  const row = button.closest(".history-row");
-  const text = row && row.querySelector(".history-text")
-    ? row.querySelector(".history-text").textContent
-    : "";
-  if (!text) return;
-  ipc({ cmd: "copy_history", text });
+  const index = Number(button.dataset.copyHistory);
+  if (!Number.isInteger(index) || index < 0) return;
+  ipc({ cmd: "copy_history", index });
 });
 
 $("#clearHistory").addEventListener("click", () => {

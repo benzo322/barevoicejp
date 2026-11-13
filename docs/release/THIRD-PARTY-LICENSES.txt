@@ -85,14 +85,6 @@ BAREVoiceJP 第三者ライセンス表記
       Haas-ja-v1.0 (int8 量子化版):
         https://huggingface.co/oboroge0/Haas-ja-v1.0-onnx-quantized
 
-  Python / PyQt
-    本アプリのビルドおよび配布物には、Python および PyQt は含まれません。
-    リポジトリ内の voice_input.py は旧 Python プロトタイプであり、
-    Windows アプリのビルド・実行には使用していません。同ファイルを
-    単独で利用する場合は、numpy、sherpa-onnx、sounddevice、pynput、
-    pyperclip、rapidfuzz などの依存パッケージにそれぞれのライセンスが
-    適用されます。
-
 
 3. ライセンス全文
 -----------------

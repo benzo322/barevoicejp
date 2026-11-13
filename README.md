@@ -13,7 +13,7 @@
 
 - **完全ローカル推論** — クラウドAPI・アカウント登録は不要
 - **押して話すだけ** — ホットキーは変更可能 (既定 `alt_r`)。200ms 未満の押下は誤操作として破棄
-- **6種類のモデル** — 初回起動のオンボーディングまたは設定画面から、sherpa-onnx 公式リリース (GitHub) / Hugging Face より直接ダウンロード。社内サーバー / 共有フォルダの配布元へも切り替え可能 (アプリ本体には同梱しない)
+- **6種類のモデル** — 初回起動のオンボーディングまたは設定画面から、sherpa-onnx 公式リリース (GitHub) / Hugging Face より直接ダウンロード。自前のサーバー / 共有フォルダの配布元へも切り替え可能 (アプリ本体には同梱しない)
 - **日本語向けテキスト整形** — タグ除去、空白正規化、辞書置換、英日境界のスペース補正、`SenseVoice` の ITN
 - **辞書のホットリロード** — `words.txt` / `replacements.json` は保存すると次回の発話から反映。`hotwords.txt` は監視のみ (現行エンジンは未対応)
 - **常駐UI** — トレイ常駐、設定画面 (操作 / モデル / マイク / 辞書 / 履歴 / 通知音 / ガイド / 技術スタック)、初回オンボーディング
@@ -137,7 +137,7 @@ logs/
 - 音声はメモリ上のリングバッファだけに保持し、ファイルへ書き出さない
 - `stats.json` に保存するのは文字数と貼り付け回数だけで、累積実績に認識結果の本文は保存しない
 - 認識結果の本文は `history.json` に直近10件だけ保存される。設定画面の「履歴」タブから全件クリアできる
-- 社内配布元を使う場合は `checksums.sha256` と照合してから展開・配置する。公式配布元直取得は HTTPS と Content-Length で検証し、Haas-ja は組み込みの SHA-256 でも検証する
+- モデルは配布元から取得後、必ずサイズと SHA-256 を検証してから展開・配置する。カスタム配布元は `checksums.sha256`、公式配布元はバイナリへ埋め込んだ SHA-256 と照合する
 - リモートの配布元は HTTPS を必須とし、HTTPS → HTTP のリダイレクトも拒否する（平文 HTTP はループバック検証時のみ）
 - アーカイブの受信・展開サイズに上限を設け、圧縮爆弾によるディスク枯渇を防ぐ
 - 設定画面の WebView は埋め込みページ以外への遷移、新しいウィンドウ、権限要求を拒否する
@@ -158,13 +158,13 @@ logs/
 | `whisper-small` | Whisper Small | 約 610 MB | 3 | 4 | 速度と精度のバランス |
 | `whisper-turbo` | Whisper Turbo | 約 538 MB | 2 | 5 | 高精度。マシンパワーが必要 |
 
-モデル本体はアプリに同梱せず、初回起動後に設定画面の「モデル」タブからダウンロードする。既定では sherpa-onnx 公式リリース (GitHub) から直接取得し、`haas-ja-v1.0` のみ Hugging Face (`oboroge0/Haas-ja-v1.0-onnx-quantized`) から取得する。`config.toml` の `model_base_url` を設定すると、社内サーバー（HTTPS または UNC 共有）からの配布に切り替えられる。Whisper は日本語 (`ja`) 固定、SenseVoice は `--language` で切り替えられる。
+モデル本体はアプリに同梱せず、初回起動後に設定画面の「モデル」タブからダウンロードする。既定では sherpa-onnx 公式リリース (GitHub) から直接取得し、`haas-ja-v1.0` のみ Hugging Face (`oboroge0/Haas-ja-v1.0-onnx-quantized`) から取得する。`config.toml` の `model_base_url` を設定すると、自前のサーバー（HTTPS または UNC 共有）からの配布に切り替えられる。Whisper は日本語 (`ja`) 固定、SenseVoice は `--language` で切り替えられる。
 
 `haas-ja-v1.0` は int8/4bit 量子化版で、`encoder.quantized.onnx` と外部データ `encoder.data` を同じディレクトリに置く必要がある（設定画面からのダウンロードでは自動的に揃う）。旧 fp32 版の `encoder.onnx` が既にある場合もそのまま起動できるが、軽量化するにはモデルを削除して再ダウンロードする。
 
-### 配布元の切り替え（社内サーバー / 共有フォルダ）
+### 配布元の切り替え（任意のサーバー / 共有フォルダ）
 
-既定の公式配布元直取得をやめ、社内サーバーや共有フォルダから配布する場合の設定。`model_base_url` を空に戻せば公式配布元へ戻る。
+既定の公式配布元直取得をやめ、自前のサーバーや共有フォルダから配布する場合の設定。`model_base_url` を空に戻せば公式配布元へ戻る。
 
 #### 設定ファイルとキー
 
@@ -174,10 +174,10 @@ logs/
 %LOCALAPPDATA%\Programs\BAREVoiceJP\config.toml
 ```
 
-キーは **`model_base_url`** 1つ。空なら公式配布元 (sherpa-onnx GitHub / Hugging Face) から直接ダウンロードし、値を入れると社内配布元を使う。`config.toml` を開き、次の行を追加または変更する（アプリ再起動後に反映）。
+キーは **`model_base_url`** 1つ。空なら公式配布元 (sherpa-onnx GitHub / Hugging Face) から直接ダウンロードし、値を入れるとその配布元を使う。`config.toml` を開き、次の行を追加または変更する（アプリ再起動後に反映）。
 
 ```toml
-# HTTPS の社内 Web サーバー（末尾スラッシュは有無どちらでも可）
+# HTTPS の Web サーバー（末尾スラッシュは有無どちらでも可）
 model_base_url = "https://barevoice.example.co.jp/models"
 ```
 
@@ -199,7 +199,7 @@ model_base_url = 'D:\BAREVoiceJP\models'
 | 絶対パス | `D:\BAREVoiceJP\models` | ローカルフォルダからストリームコピー |
 | `file://` | `file:///C:/BAREVoiceJP/models` | 上記の絶対パスとして扱う |
 
-`model_base_url` が空の場合は、設定画面の「モデル」タブに公式配布元 (sherpa-onnx GitHub / Hugging Face) の説明が表示され、そこから直接ダウンロードする。社内配布元を指定した場合は、その URL / パスが表示される。
+`model_base_url` が空の場合は、設定画面の「モデル」タブに公式配布元 (sherpa-onnx GitHub / Hugging Face) の説明が表示され、そこから直接ダウンロードする。配布元を指定した場合は、その URL / パスが表示される。
 
 #### サーバー側の配置
 
@@ -266,7 +266,7 @@ sha256sum *.tar.bz2 encoder.quantized.onnx encoder.data decoder.onnx joiner.onnx
 5. 不一致なら `.part` を削除し、モデルカードに  
    `SHA-256 が一致しません。ダウンロードが不完全です。再ダウンロードしてください。` を表示
 
-進捗は `ダウンロード中 → 検証中 → 展開中 → DL済み` の順で表示される。公式リリースの tar.bz2 直取得ではハッシュがないため `検証中` を省き、`ダウンロード中 → 展開中 → DL済み` となる。Haas-ja は公式配布元から取得する場合も組み込みの SHA-256 で検証する。接続失敗・タイムアウト時は `モデル配布元に接続できません。ネットワーク接続を確認してください: <URL>` を表示する。共有パスの場合は `社内サーバーの共有パスに接続できません` / `ファイルがありません` / `共有権限を確認してください` を表示する。
+進捗は `ダウンロード中 → 検証中 → 展開中 → DL済み` の順で表示される。HTTP 配布元が `Content-Length` を返さない場合や、受信バイト数が想定と異なる場合は、サイズを検証できないためその時点で中断する。公式配布元の tar.bz2 も、組み込みの SHA-256 とバイト数で検証する。接続失敗・タイムアウト時は `モデル配布元に接続できません。ネットワーク接続を確認してください: <URL>` を表示する。共有フォルダの場合は `配布元のフォルダに接続できません` / `ファイルがありません` / `アクセス権を確認してください` を表示する。
 
 #### ローカルモックでの確認
 
@@ -346,7 +346,7 @@ ASR が返す読みを完全一致で置換する。
 |---|---|---|
 | `first_run` | `true` | オンボーディングを表示するか |
 | `model` | `sensevoice` | 使用モデル ID |
-| `model_base_url` | `""` | モデル配布元。空なら公式配布元 (sherpa-onnx GitHub / Hugging Face) から直接ダウンロード。`https://...` / UNC / 絶対パスを指定すると社内配布元。平文 HTTP はループバックのみ |
+| `model_base_url` | `""` | モデル配布元。空なら公式配布元 (sherpa-onnx GitHub / Hugging Face) から直接ダウンロード。`https://...` / UNC / 絶対パスを指定すると任意の配布元。平文 HTTP はループバックのみ |
 | `hotkey` | `alt_r` | 押している間だけ録音するキー |
 | `autostart` | `false` | Windows ログオン時に自動起動 |
 | `device` | (なし) | 入力デバイスの番号または名前の一部 |
@@ -457,14 +457,12 @@ src/
   web/          設定画面・オンボーディング (HTML/CSS/JS)
 tests/text_cases.json   テキスト整形の評価ケース
 tools/make_icon.py      アイコン生成スクリプト
-voice_input.py          旧 Python プロトタイプ (実行時には不要)
 docs/release/README.txt                 配布 ZIP 同梱の利用者向け README
 docs/release/THIRD-PARTY-LICENSES.txt   第三者ライセンス表記
 .github/workflows/release.yml           Windows リリース自動化
+.github/workflows/ci.yml                Windows CI (fmt / clippy / test)
 LICENSE                                  MIT License
 ```
-
-`voice_input.py` は Rust 版以前のクロスプラットフォーム・プロトタイプで、整形ロジックの移植元。Windows アプリのビルドや実行には使わない。
 
 ## 既知の制限
 

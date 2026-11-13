@@ -63,8 +63,7 @@ fn embedded_page_url(html: &str) -> String {
 /// 許可する。任意の `data:` や `about:` を許可すると、そのページが IPC
 /// (`window.ipc`) を叩ける状態になるため、内容が一致しない URL は拒否する。
 fn is_builtin_page(url: &str, embedded: &str) -> bool {
-    url.is_empty()
-        || url == "about:blank"
+    url == "about:blank"
         || url.starts_with("about:blank#")
         || url == embedded
         || url
@@ -371,6 +370,7 @@ fn build_onboarding(
     let ipc_embedded = Arc::clone(&embedded);
     let webview = WebViewBuilder::new()
         .with_html(html)
+        .with_initialization_script(include_str!("web/onboarding.js"))
         .with_background_color((247, 250, 255, 255))
         .with_devtools(cfg!(debug_assertions))
         .with_navigation_handler(move |url| is_builtin_page(&url, &embedded))
@@ -474,10 +474,18 @@ fn handle_ipc(
             }
         }
         "copy_history" => {
-            let Some(text) = value.get("text").and_then(Value::as_str) else {
+            let Some(index) = value
+                .get("index")
+                .and_then(Value::as_u64)
+                .and_then(|index| usize::try_from(index).ok())
+            else {
                 return;
             };
-            match win::clipboard_set(text) {
+            let Some(entry) = app.shared().history().into_iter().nth(index) else {
+                set_notice(notice, notice_id, "error", "履歴が見つかりません");
+                return;
+            };
+            match win::clipboard_set(&entry.text) {
                 Ok(()) => set_notice(notice, notice_id, "success", "履歴をコピーしました"),
                 Err(exc) => set_notice(notice, notice_id, "error", &exc),
             }
@@ -816,7 +824,6 @@ mod tests {
     fn allows_only_embedded_pages() {
         let embedded = embedded_page_url(include_str!("web/settings.html"));
         for url in [
-            "",
             "about:blank",
             "about:blank#models",
             embedded.as_str(),
@@ -825,6 +832,7 @@ mod tests {
             assert!(is_builtin_page(url, &embedded), "{url} を拒否した");
         }
         for url in [
+            "",
             "about:config",
             "data:text/html,<script>alert(1)</script>",
             "https://example.com/",

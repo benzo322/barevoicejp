@@ -1,6 +1,6 @@
 //! 起動設定と CLI。
 //!
-//! `voice_input.py` の `CONFIG` と `build_arg_parser` / `apply_cli_overrides` を
+//! 旧 Python 実装の `CONFIG` と `build_arg_parser` / `apply_cli_overrides` を
 //! そのまま Rust へ移植したもの。
 
 use std::fs;
@@ -204,7 +204,7 @@ pub(crate) struct Config {
     pub(crate) hotwords_score: f32,
     /// モデル配布元。空なら公式配布元 (sherpa-onnx GitHub / Hugging Face) から
     /// 直接ダウンロードする。
-    /// `https://...` または `\\server\share\...` を指定すると社内配布元を使う。
+    /// `https://...` または `\\server\share\...` を指定すると任意の配布元を使う。
     pub(crate) model_base_url: String,
 
     // --- 録音 / ホットキー ---
@@ -376,7 +376,7 @@ pub(crate) struct Settings {
     pub(crate) floating_bar: bool,
     /// モデル配布元。空なら公式配布元 (sherpa-onnx GitHub / Hugging Face) から
     /// 直接ダウンロードする。
-    /// 社内サーバー / 共有フォルダを使う場合に指定する。
+    /// 自前のサーバー / 共有フォルダを使う場合に指定する。
     #[serde(default)]
     pub(crate) model_base_url: String,
 }

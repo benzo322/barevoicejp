@@ -1,4 +1,4 @@
-; BAREVoiceJP 社内配布用インストーラー
+; BAREVoiceJP インストーラー
 ; 一般ユーザー権限で {localappdata}\Programs\BAREVoiceJP へインストールする。
 
 #define MyAppName "BAREVoiceJP"

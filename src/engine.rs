@@ -785,7 +785,7 @@ fn find_whisper_tokens(dir: &Path) -> Option<PathBuf> {
     candidates.into_iter().next()
 }
 
-/// モデル未配置時の案内。外部 URL は示さず、社内配布元の設定を促す。
+/// モデル未配置時の案内。外部 URL は示さず、配布元の設定を促す。
 const MODEL_DOWNLOAD_HINT: &str = "\
   設定画面の「モデル」タブからダウンロードしてください。\n\
   配布元は exe と同じディレクトリの config.toml の model_base_url で指定します。\n";

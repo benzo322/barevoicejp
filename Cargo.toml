@@ -2,7 +2,11 @@
 name = "BAREVoiceJP"
 version = "0.1.5"
 edition = "2024"
+rust-version = "1.85"
 description = "超低遅延 Push-to-Talk 音声入力 (SenseVoice / sherpa-onnx)"
+license = "MIT"
+repository = "https://github.com/benzo322/barevoicejp"
+readme = "README.md"
 
 [build-dependencies]
 winres = "0.1"
