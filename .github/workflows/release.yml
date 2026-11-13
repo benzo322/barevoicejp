@@ -34,6 +34,42 @@ jobs:
           # 手動実行時は指定されたタグを、タグ push 時はそのタグをビルドする。
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
+      # 配布物に含める文書はタグより後に整備されることがある
+      # (v0.1.5 タグには LICENSE と docs/release/* が含まれない)。
+      # その場合のみ既定ブランチから補完する。
+      - name: Restore release documents missing from the tag
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location $env:GITHUB_WORKSPACE
+
+          $documents = @(
+            'LICENSE',
+            'docs/release/README.txt',
+            'docs/release/THIRD-PARTY-LICENSES.txt'
+          )
+          $missing = @($documents | Where-Object { -not (Test-Path -LiteralPath $_) })
+          if ($missing.Count -eq 0) {
+            Write-Host '配布文書はすべてタグに含まれています'
+            return
+          }
+
+          Write-Host "既定ブランチから補完します: $($missing -join ', ')"
+          git fetch --no-tags --depth 1 origin '+refs/heads/main:refs/remotes/origin/main'
+          if ($LASTEXITCODE -ne 0) {
+            throw '既定ブランチの取得に失敗しました'
+          }
+          foreach ($document in $missing) {
+            $parent = Split-Path -Parent $document
+            if ($parent) {
+              New-Item -ItemType Directory -Force -Path $parent | Out-Null
+            }
+            git checkout origin/main -- $document
+            if ($LASTEXITCODE -ne 0) {
+              throw "配布文書を取得できませんでした: $document"
+            }
+          }
+
       - name: Resolve and validate release tag
         id: tag
         shell: pwsh
@@ -105,18 +141,24 @@ jobs:
             throw 'sherpa-onnx の展開に失敗しました'
           }
 
+          $sherpaLib = Join-Path $env:GITHUB_WORKSPACE (Join-Path $env:SHERPA_DIR 'lib')
           $required = @(
-            'lib\sherpa-onnx-c-api.lib',
-            'lib\sherpa-onnx-c-api.dll',
-            'lib\onnxruntime.dll',
-            'lib\onnxruntime_providers_shared.dll'
+            'sherpa-onnx-c-api.lib',
+            'sherpa-onnx-c-api.dll',
+            'onnxruntime.dll',
+            'onnxruntime_providers_shared.dll'
           )
           foreach ($item in $required) {
-            $path = Join-Path $env:SHERPA_DIR $item
+            $path = Join-Path $sherpaLib $item
             if (-not (Test-Path -LiteralPath $path)) {
               throw "sherpa-onnx の必須ファイルがありません: $path"
             }
           }
+
+          # 配布物は target\release の DLL に頼らず、ここから直接コピーする。
+          $utf8 = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::AppendAllText($env:GITHUB_ENV, "SHERPA_LIB=$sherpaLib`n", $utf8)
+          Write-Host "SHERPA_LIB=$sherpaLib"
 
       - name: Build release executable
         run: cargo build --release --locked
@@ -135,9 +177,6 @@ jobs:
 
           $files = @(
             'target\release\BAREVoiceJP.exe',
-            'target\release\sherpa-onnx-c-api.dll',
-            'target\release\onnxruntime.dll',
-            'target\release\onnxruntime_providers_shared.dll',
             'words.txt',
             'replacements.json',
             'hotwords.txt',
@@ -150,6 +189,19 @@ jobs:
               throw "配布物が見つかりません: $file"
             }
             Copy-Item -LiteralPath $file -Destination $stage
+          }
+
+          # DLL はビルド成果物の隣ではなく、展開した sherpa-onnx から直接取得する。
+          foreach ($name in @(
+            'sherpa-onnx-c-api.dll',
+            'onnxruntime.dll',
+            'onnxruntime_providers_shared.dll'
+          )) {
+            $source = Join-Path $env:SHERPA_LIB $name
+            if (-not (Test-Path -LiteralPath $source)) {
+              throw "sherpa-onnx の DLL が見つかりません: $source"
+            }
+            Copy-Item -LiteralPath $source -Destination $stage
           }
 
           $expected = @(
