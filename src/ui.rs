@@ -99,8 +99,8 @@ pub(crate) fn run(mut app: App) -> ! {
 
     let window = match WindowBuilder::new()
         .with_title("BAREVoiceJP — 設定")
-        .with_inner_size(LogicalSize::new(1080.0, 800.0))
-        .with_min_inner_size(LogicalSize::new(1000.0, 720.0))
+        .with_inner_size(LogicalSize::new(1080.0, 900.0))
+        .with_min_inner_size(LogicalSize::new(1000.0, 640.0))
         .with_decorations(false)
         .with_resizable(false)
         .with_visible(false)
@@ -115,6 +115,7 @@ pub(crate) fn run(mut app: App) -> ! {
         }
     };
 
+    fit_window_to_work_area(&window);
     place_window(&window);
 
     let ipc_proxy = proxy.clone();
@@ -202,7 +203,10 @@ pub(crate) fn run(mut app: App) -> ! {
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(UiEvent::ShowSettings) => {
-                show_window(&window, &webview, "control");
+                // 開いた直後だけ既定タブへ寄せる。表示中に呼ばれたときは、
+                // ユーザーが選んだタブを維持する。
+                let tab = (!window.is_visible()).then(|| default_tab(&app, &settings));
+                show_window(&window, &webview, tab);
                 push_state(&webview, &app, &settings, &notice);
                 push_level(&webview, &app);
             }
@@ -217,7 +221,7 @@ pub(crate) fn run(mut app: App) -> ! {
                     onboarding_window.set_visible(false);
                 }
                 // 初回はモデルが未ダウンロードなので、そのまま「モデル」タブへ誘導する。
-                show_window(&window, &webview, "models");
+                show_window(&window, &webview, Some("models"));
                 push_state(&webview, &app, &settings, &notice);
                 push_level(&webview, &app);
             }
@@ -293,21 +297,54 @@ pub(crate) fn run(mut app: App) -> ! {
     });
 }
 
+/// 設定画面の既定タブを返す。
+///
+/// モデルが揃っていれば「履歴」を開き、未ダウンロードなら「モデル」へ誘導する。
+fn default_tab(app: &App, settings: &Settings) -> &'static str {
+    let config = app.shared().snapshot();
+    if models::is_installed(&config, &settings.model) {
+        "history"
+    } else {
+        "models"
+    }
+}
+
 /// 設定画面をフローティングバーの直上へ出し、最前面へ持ってくる。
 ///
-/// `tab` で開くタブを指定する。手動で開いたときは「操作」、オンボーディング完了後は「モデル」。
-fn show_window(window: &Window, webview: &WebView, tab: &str) {
+/// `tab` は開いた直後に選択するタブ。`None` なら現在のタブをそのまま残す。
+fn show_window(window: &Window, webview: &WebView, tab: Option<&str>) {
     window.set_minimized(false);
     place_window(window);
     window.set_visible(true);
     window.set_focus();
     win::force_foreground(window.hwnd() as *mut core::ffi::c_void);
+    let Some(tab) = tab else {
+        return;
+    };
     let script = format!(
         "window.__barevoice && window.__barevoice.openTab && window.__barevoice.openTab('{tab}');"
     );
     if let Err(exc) = webview.evaluate_script(&script) {
         crate::debug!("{tab} タブへ切り替えられません: {exc}");
     }
+}
+
+/// 設定ウィンドウの高さをワークエリアに収める。
+///
+/// 125%〜150% のスケーリングでは 900 論理 px が画面より高くなり、
+/// 下端のボタンやフッターが画面外へ出てしまうため、収まる高さまで縮める。
+fn fit_window_to_work_area(window: &Window) {
+    let Some(work) = work_area() else {
+        return;
+    };
+    let scale = window.scale_factor();
+    // `place_window` がフローティングバーの上へ空ける 38 論理 px も確保する。
+    let available = (work.bottom - work.top) as f64 / scale - 38.0;
+    let size = window.inner_size().to_logical::<f64>(scale);
+    if size.height <= available {
+        return;
+    }
+    window.set_inner_size(LogicalSize::new(size.width, available.max(640.0)));
 }
 
 /// プライマリディスプレイのワークエリアを返す。

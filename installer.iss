@@ -2,7 +2,7 @@
 ; 一般ユーザー権限で {localappdata}\Programs\BAREVoiceJP へインストールする。
 
 #define MyAppName "BAREVoiceJP"
-#define MyAppVersion "0.1.6"
+#define MyAppVersion "0.1.7"
 #define MyAppExeName "BAREVoiceJP.exe"
 
 [Setup]
@@ -24,7 +24,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-VersionInfoVersion=0.1.6.0
+VersionInfoVersion=0.1.7.0
 VersionInfoCompany={#MyAppName}
 VersionInfoDescription={#MyAppName} Setup
 VersionInfoProductName={#MyAppName}
