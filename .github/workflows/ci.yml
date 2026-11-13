@@ -80,4 +80,10 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Run tests
-        run: cargo test --locked
+        shell: pwsh
+        run: |
+          # Cargo 1.100 以降、テスト実行ファイルは target\debug\build\<pkg>\<hash>\out に
+          # 置かれ、DLL はその隣に無い。build.rs が DLL をコピーする target\debug を
+          # PATH に追加して解決させる。
+          $env:PATH = "$env:GITHUB_WORKSPACE\target\debug;$env:PATH"
+          cargo test --locked

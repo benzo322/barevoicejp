@@ -54,10 +54,22 @@ fn main() {
     let Ok(out_dir) = std::env::var("OUT_DIR") else {
         return;
     };
-    let mut profile_dir = PathBuf::from(out_dir);
-    for _ in 0..3 {
-        profile_dir.pop();
-    }
+    // OUT_DIR は Cargo 1.100 以降 `<target>/<profile>/build/<pkg>/<hash>/out`、
+    // それ以前は `<target>/<profile>/build/<pkg>-<hash>/out`。`build` の親が
+    // プロファイルディレクトリ (`<target>/<profile>`) になる。
+    let out_dir = PathBuf::from(out_dir);
+    let Some(profile_dir) = out_dir
+        .ancestors()
+        .find(|path| path.file_name() == Some(std::ffi::OsStr::new("build")))
+        .and_then(|path| path.parent())
+        .map(|path| path.to_path_buf())
+    else {
+        println!(
+            "cargo:warning=OUT_DIR からプロファイルディレクトリを特定できません: {}",
+            out_dir.display()
+        );
+        return;
+    };
     let bin_dir = root.join("lib");
     for name in [
         "sherpa-onnx-c-api.dll",

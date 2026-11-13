@@ -71,6 +71,17 @@ cargo build --release
 
 モデルは初回起動時に設定画面からダウンロードする。手動で配置する場合は `models/<モデル名>/` に展開する。
 
+### テスト
+
+```powershell
+# Cargo 1.100 以降、テスト実行ファイルは target\debug\build\... に置かれるため、
+# build.rs が DLL をコピーする target\debug を PATH に追加する。
+$env:PATH = "$PWD\target\debug;$env:PATH"
+cargo test
+```
+
+`#[ignore]` 付きのテスト（実モデルと sherpa-onnx DLL が必要）は既定では実行されない。
+
 ### インストーラ
 
 [Inno Setup 6](https://jrsoftware.org/isinfo.php) をインストールし、リポジトリ直下で:
