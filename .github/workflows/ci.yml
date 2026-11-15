@@ -36,42 +36,8 @@ jobs:
 
       # build.rs が sherpa-onnx のインポートライブラリを要求するため、
       # テストのコンパイル前に SDK を配置する。
-      - name: Download and verify sherpa-onnx
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $archive = Join-Path $env:RUNNER_TEMP 'sherpa-onnx-win-x64.tar.bz2'
-          $url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/${env:SHERPA_VERSION}/${env:SHERPA_DIR}.tar.bz2"
-
-          Write-Host "Downloading $url"
-          curl.exe -L --fail --retry 3 --retry-delay 2 --output $archive $url
-          if ($LASTEXITCODE -ne 0) {
-            throw "sherpa-onnx のダウンロードに失敗しました: $url"
-          }
-
-          $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          $expected = $env:SHERPA_SHA256.ToLowerInvariant()
-          if ($actual -ne $expected) {
-            throw "sherpa-onnx の SHA256 が一致しません: expected=$expected actual=$actual"
-          }
-
-          tar.exe -xjf $archive -C $env:GITHUB_WORKSPACE
-          if ($LASTEXITCODE -ne 0) {
-            throw 'sherpa-onnx の展開に失敗しました'
-          }
-
-          $sherpaLib = Join-Path $env:GITHUB_WORKSPACE (Join-Path $env:SHERPA_DIR 'lib')
-          foreach ($item in @(
-            'sherpa-onnx-c-api.lib',
-            'sherpa-onnx-c-api.dll',
-            'onnxruntime.dll',
-            'onnxruntime_providers_shared.dll'
-          )) {
-            $path = Join-Path $sherpaLib $item
-            if (-not (Test-Path -LiteralPath $path)) {
-              throw "sherpa-onnx の必須ファイルがありません: $path"
-            }
-          }
+      - name: Setup sherpa-onnx
+        uses: ./.github/actions/setup-sherpa
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -87,3 +53,46 @@ jobs:
           # PATH に追加して解決させる。
           $env:PATH = "$env:GITHUB_WORKSPACE\target\debug;$env:PATH"
           cargo test --locked
+
+  # Cargo.toml の rust-version 宣言を実際にビルドして検証する。
+  # stable だけを回していると、let chains のように 1.88 以降でしか
+  # コンパイルできないコードが混ざっても宣言の誤りに気づけない。
+  msrv:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust (MSRV)
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv
+
+      - name: Setup sherpa-onnx
+        uses: ./.github/actions/setup-sherpa
+
+      - name: Check with MSRV toolchain
+        run: cargo check --locked --all-targets
+
+  # 常駐してキーボードをフックするバイナリを配布しているため、
+  # 依存クレートの既知脆弱性を push / PR ごとに確認する。
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      checks: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Audit dependencies
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
