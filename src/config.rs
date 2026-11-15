@@ -547,7 +547,7 @@ SenseVoice / ReazonSpeech / Haas-ja / Whisper を使う Push-to-Talk 音声入�
   --provider NAME            ONNX Runtime provider (既定: cpu)
   --hotwords-score F         ホットワードスコア (現行エンジンは未対応)
   --highpass / --no-highpass 80Hz ハイパスフィルタ (既定: OFF)
-  --denoise / --no-denoise   RNNoise ノイズリダクション (既定: OFF)
+  --denoise / --no-denoise   RNNoise ノイズリダクション (未実装・指定しても無効)
   --pre-roll-ms MS           押下直前の音声を含める長さ (既定: 200)
   --min-duration-ms MS       これ未満の押下は破棄 (既定: 200)
   --paste-delay-ms MS        クリップボード設定から貼り付けまでの待機 (既定: 50)

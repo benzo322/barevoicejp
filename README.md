@@ -414,7 +414,7 @@ BAREVoiceJP [オプション]
 | `--provider NAME` | `cpu` | ONNX Runtime execution provider |
 | `--hotwords-score F` | `2.0` | ホットワードスコア (現行エンジンは未対応) |
 | `--highpass` / `--no-highpass` | OFF | 80 Hz ハイパスフィルタ |
-| `--denoise` / `--no-denoise` | OFF | RNNoise ノイズリダクション |
+| `--denoise` / `--no-denoise` | OFF | RNNoise ノイズリダクション (未実装・指定しても無効) |
 | `--pre-roll-ms MS` | `200` | 押下直前の音声を含める長さ |
 | `--min-duration-ms MS` | `200` | これ未満の押下は破棄 |
 | `--paste-delay-ms MS` | `50` | クリップボード設定から貼り付けまでの待機 |
