@@ -726,6 +726,7 @@ fn snapshot(app: &App, settings: &Settings, notice: &Option<Notice>) -> Value {
                 "accuracy": spec.accuracy,
                 "recommended": spec.recommended,
                 "installed": installed,
+                "directoryExists": models::has_model_dir(&config, spec.id),
                 "installedBytes": bytes,
                 "installedLabel": models::format_bytes(bytes),
                 "download": {

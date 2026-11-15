@@ -161,6 +161,8 @@ function renderModels() {
     grid.innerHTML = (state.models || []).map(model => {
       const selected = model.id === state.settings.model;
       const active = model.installed && selected;
+      // 展開が途中で止まった残骸。インストール済みではないがフォルダはある。
+      const incomplete = !model.installed && model.directoryExists;
       const download = model.download || {};
       const busy = download.phase === "downloading"
         || download.phase === "verifying"
@@ -177,6 +179,8 @@ function renderModels() {
         action = `<span class="size">${phaseLabel}</span>`;
       } else if (model.installed) {
         action = `<button class="btn danger icon" data-delete="${esc(model.id)}" ${active ? "disabled" : ""} title="ストレージを解放">${icon("trash")}</button>`;
+      } else if (incomplete) {
+        action = `<button class="btn danger icon" data-delete="${esc(model.id)}" title="不完全なファイルを削除してやり直す">${icon("trash")}</button>`;
       } else {
         action = `<button class="btn primary" data-download="${esc(model.id)}">${icon("download")}ダウンロード</button>`;
       }
@@ -193,8 +197,8 @@ function renderModels() {
             <div class="model-icon">${icon("model")}</div>
             <div style="flex:1">
               <div class="model-name">${esc(model.name)}
-                ${model.recommended ? '<span class="badge recommend">★ 推奨（0.2秒・最速）</span>' : ""}
-                ${model.installed ? '<span class="badge green">DL済み</span>' : (busy ? "" : '<span class="badge warn">未ダウンロード</span>')}
+                ${model.recommended ? '<span class="badge recommend">★ 推奨</span>' : ""}
+                ${model.installed ? '<span class="badge green">DL済み</span>' : (busy ? "" : (incomplete ? '<span class="badge warn">不完全</span>' : '<span class="badge warn">未ダウンロード</span>'))}
               </div>
               <div class="model-sub">${esc(model.subtitle)}</div>
             </div>

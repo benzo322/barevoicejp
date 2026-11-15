@@ -588,6 +588,14 @@ pub(crate) fn is_installed(config: &Config, id: &str) -> bool {
     installed_at(&config.default_model_dir_for(id), id)
 }
 
+/// モデルのディレクトリが存在するか (中身が揃っているかは問わない)。
+///
+/// 展開が途中で止まった残骸を UI から削除できるようにするための判定。
+/// `is_installed` が false でも true になり得る。
+pub(crate) fn has_model_dir(config: &Config, id: &str) -> bool {
+    spec(id).is_some() && config.default_model_dir_for(id).is_dir()
+}
+
 /// 指定ディレクトリにモデルの実体が揃っているか。
 fn installed_at(dir: &Path, id: &str) -> bool {
     let files = || {
@@ -702,18 +710,30 @@ where
                     ..DownloadState::default()
                 },
             );
-        } else {
-            fail(
-                id,
-                format!(
-                    "モデルの展開先が不完全な状態で存在します。\
-                     削除してから再ダウンロードしてください: {}",
-                    dest.display()
-                ),
-            );
+            done();
+            return;
         }
-        done();
-        return;
+        // 展開が途中で止まった残骸。ここで止めると UI から削除できず
+        // 「削除してから再ダウンロード」を促すだけで復帰できなくなるため、
+        // 自動で捨てて最初から取り直す。
+        match fs::remove_dir_all(&dest) {
+            Ok(()) => crate::warn!(
+                "不完全なモデルフォルダを削除して再ダウンロードします: {}",
+                dest.display()
+            ),
+            Err(exc) => {
+                fail(
+                    id,
+                    format!(
+                        "不完全なモデルフォルダを削除できません ({}): {exc}。\
+                         手動で削除してから再ダウンロードしてください。",
+                        dest.display()
+                    ),
+                );
+                done();
+                return;
+            }
+        }
     }
     update(
         id,
@@ -1230,15 +1250,24 @@ fn archive_metadata(path: &Path) -> u64 {
     fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
+/// モデルを削除してはいけない状態か (使用中かつ実体が揃っている)。
+///
+/// 使用中でも実体が不完全なら削除を許す。ここを `config.model == id` だけで
+/// 判定すると、展開が途中で止まった残骸を UI から消せなくなる。
+fn delete_blocked(config: &Config, id: &str, dir: &Path) -> bool {
+    config.model == id && installed_at(dir, id)
+}
+
 /// モデルを削除して解放したバイト数を返す。
 pub(crate) fn delete(config: &Config, id: &str) -> Result<u64, String> {
     if !config::MODEL_IDS.contains(&id) {
         return Err("不明なモデルです".to_string());
     }
-    if config.model == id {
+    let dir = config.default_model_dir_for(id);
+    // 不完全な残骸は使用中でも消せる。ここで拒むと UI から復帰できなくなる。
+    if delete_blocked(config, id, &dir) {
         return Err("使用中のモデルは削除できません".to_string());
     }
-    let dir = config.default_model_dir_for(id);
     let root = config::models_root();
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
     let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.clone());
@@ -1686,6 +1715,47 @@ BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  models/other.t
             .manifest_text()
             .expect_err("接続失敗");
         assert!(error.contains("モデル配布元に接続できません"), "{error}");
+    }
+
+    #[test]
+    fn detects_leftover_model_dir_and_allows_deleting_it() {
+        let dir = temp_dir("incomplete");
+        let mut config = Config::default();
+        config.reazonspeech_model_dir = dir.clone();
+        config.model = "reazonspeech".to_string();
+
+        // フォルダだけあって中身が空 = 展開が途中で止まった残骸。
+        assert!(has_model_dir(&config, "reazonspeech"));
+        assert!(!is_installed(&config, "reazonspeech"));
+        assert!(
+            !delete_blocked(&config, "reazonspeech", &dir),
+            "不完全なら使用中モデルでも削除できること"
+        );
+        assert!(
+            !has_model_dir(&config, "unknown-model"),
+            "未知の ID はディレクトリがあっても false"
+        );
+
+        // 実体が揃えば使用中モデルとして保護される。
+        for name in [
+            "encoder-epoch-99-avg-1.int8.onnx",
+            "decoder-epoch-99-avg-1.onnx",
+            "joiner-epoch-99-avg-1.int8.onnx",
+            "tokens.txt",
+        ] {
+            fs::write(dir.join(name), b"").expect("ダミーファイル作成");
+        }
+        assert!(is_installed(&config, "reazonspeech"));
+        assert!(
+            delete_blocked(&config, "reazonspeech", &dir),
+            "完全なモデルは使用中なら削除を拒むこと"
+        );
+
+        // 使用中でなければ完全なモデルでも削除できる。
+        config.model = "sensevoice".to_string();
+        assert!(!delete_blocked(&config, "reazonspeech", &dir));
+
+        fs::remove_dir_all(dir).expect("後片付け");
     }
 
     #[test]
