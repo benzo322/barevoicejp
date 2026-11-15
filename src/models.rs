@@ -1720,9 +1720,11 @@ BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD  models/other.t
     #[test]
     fn detects_leftover_model_dir_and_allows_deleting_it() {
         let dir = temp_dir("incomplete");
-        let mut config = Config::default();
-        config.reazonspeech_model_dir = dir.clone();
-        config.model = "reazonspeech".to_string();
+        let mut config = Config {
+            reazonspeech_model_dir: dir.clone(),
+            model: "reazonspeech".to_string(),
+            ..Config::default()
+        };
 
         // フォルダだけあって中身が空 = 展開が途中で止まった残骸。
         assert!(has_model_dir(&config, "reazonspeech"));
