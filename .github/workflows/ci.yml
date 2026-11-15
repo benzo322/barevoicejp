@@ -78,3 +78,21 @@ jobs:
 
       - name: Check with MSRV toolchain
         run: cargo check --locked --all-targets
+
+  # 常駐してキーボードをフックするバイナリを配布しているため、
+  # 依存クレートの既知脆弱性を push / PR ごとに確認する。
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      checks: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Audit dependencies
+        uses: rustsec/audit-check@v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
