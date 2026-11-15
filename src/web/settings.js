@@ -339,7 +339,7 @@ function renderControls() {
     ? `<b>ダウンロード先</b> <span title="${esc(paths.models)}">${esc(paths.models)}</span><br>${sourceLine}`
     : sourceLine;
   $("#configPath").textContent = paths.config || "";
-  $("#version").textContent = `v${state.version || "0.1.7"}`;
+  $("#version").textContent = `v${state.version || "0.2.0"}`;
 }
 
 // 受信した状態を各セクションへ反映する。
