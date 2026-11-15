@@ -45,6 +45,12 @@ Source: "target\release\*.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "words.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist
 Source: "replacements.json"; DestDir: "{app}"; Flags: onlyifdoesntexist
 
+; ライセンス文書。MIT ライセンスは著作権表示の同梱が条件のため、
+; ZIP 配布 (release.yml) と同じ 3 点をインストーラーにも含める。
+Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "docs\release\README.txt"; DestDir: "{app}"; DestName: "README.txt"; Flags: ignoreversion
+Source: "docs\release\THIRD-PARTY-LICENSES.txt"; DestDir: "{app}"; DestName: "THIRD-PARTY-LICENSES.txt"; Flags: ignoreversion
+
 [Dirs]
 ; モデル本体は同梱せず、初回起動後にアプリがダウンロードする。
 Name: "{app}\models"
