@@ -829,7 +829,8 @@ fn create_sense_voice(config: &Config, model: &Path, tokens: &Path) -> Result<Re
     cfg.decoding_method = decoding.as_ptr();
 
     // SAFETY: cfg のポインタはすべて生存中の CString を指している。
-    let recognizer = unsafe { (crate::dll::api()?.create_offline_recognizer)(std::ptr::from_ref(&cfg).cast()) };
+    let recognizer =
+        unsafe { (crate::dll::api()?.create_offline_recognizer)(std::ptr::from_ref(&cfg).cast()) };
     Recognizer::from_raw(recognizer.cast())
 }
 
@@ -869,7 +870,8 @@ fn create_transducer(
     cfg.decoding_method = decoding.as_ptr();
 
     // SAFETY: cfg のポインタはすべて生存中の CString を指している。
-    let recognizer = unsafe { (crate::dll::api()?.create_offline_recognizer)(std::ptr::from_ref(&cfg).cast()) };
+    let recognizer =
+        unsafe { (crate::dll::api()?.create_offline_recognizer)(std::ptr::from_ref(&cfg).cast()) };
     Recognizer::from_raw(recognizer.cast())
 }
 
@@ -901,7 +903,8 @@ fn create_whisper(
     cfg.model_config.provider = provider.as_ptr();
 
     // SAFETY: cfg のポインタはすべて生存中の CString を指している。
-    let recognizer = unsafe { (crate::dll::api()?.create_offline_recognizer)(std::ptr::from_ref(&cfg).cast()) };
+    let recognizer =
+        unsafe { (crate::dll::api()?.create_offline_recognizer)(std::ptr::from_ref(&cfg).cast()) };
     Recognizer::from_raw(recognizer.cast())
 }
 

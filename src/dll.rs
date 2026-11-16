@@ -26,14 +26,19 @@ use windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, GetProcAddre
 /// NUL 終端の UTF-16 へ変換する。
 fn wide(text: &str) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
-    Path::new(text).as_os_str().encode_wide().chain([0]).collect()
+    Path::new(text)
+        .as_os_str()
+        .encode_wide()
+        .chain([0])
+        .collect()
 }
 
 /// exe のあるディレクトリ。
 fn exe_dir() -> Result<PathBuf, String> {
     let mut buf = vec![0u16; 32_768];
     // SAFETY: buf は書き込み可能で十分な長さがある。NULL を渡すと exe 自身のパスを返す。
-    let len = unsafe { GetModuleFileNameW(std::ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32) };
+    let len =
+        unsafe { GetModuleFileNameW(std::ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32) };
     if len == 0 {
         return Err("exe のパスを取得できません".to_string());
     }
@@ -115,8 +120,7 @@ unsafe fn symbol<T: Copy>(module: HMODULE, name: &'static [u8]) -> Result<T, Str
 
 /// sherpa-onnx C-API の関数ポインタ束。
 pub(crate) struct Api {
-    pub(crate) create_offline_recognizer:
-        unsafe extern "C" fn(*const c_void) -> *const c_void,
+    pub(crate) create_offline_recognizer: unsafe extern "C" fn(*const c_void) -> *const c_void,
     pub(crate) destroy_offline_recognizer: unsafe extern "C" fn(*const c_void),
     pub(crate) create_offline_stream: unsafe extern "C" fn(*const c_void) -> *const c_void,
     pub(crate) destroy_offline_stream: unsafe extern "C" fn(*const c_void),
@@ -137,7 +141,10 @@ pub(crate) fn api() -> Result<&'static Api, String> {
         unsafe {
             Ok(Api {
                 create_offline_recognizer: symbol(sherpa, b"SherpaOnnxCreateOfflineRecognizer\0")?,
-                destroy_offline_recognizer: symbol(sherpa, b"SherpaOnnxDestroyOfflineRecognizer\0")?,
+                destroy_offline_recognizer: symbol(
+                    sherpa,
+                    b"SherpaOnnxDestroyOfflineRecognizer\0",
+                )?,
                 create_offline_stream: symbol(sherpa, b"SherpaOnnxCreateOfflineStream\0")?,
                 destroy_offline_stream: symbol(sherpa, b"SherpaOnnxDestroyOfflineStream\0")?,
                 accept_waveform: symbol(sherpa, b"SherpaOnnxAcceptWaveformOffline\0")?,
@@ -186,7 +193,9 @@ pub(crate) fn onnxruntime_version() -> Result<String, String> {
         if pointer.is_null() {
             return Err("バージョン文字列が NULL です".to_string());
         }
-        Ok(std::ffi::CStr::from_ptr(pointer).to_string_lossy().into_owned())
+        Ok(std::ffi::CStr::from_ptr(pointer)
+            .to_string_lossy()
+            .into_owned())
     }
 }
 
