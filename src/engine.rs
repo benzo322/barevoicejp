@@ -226,30 +226,9 @@ struct SherpaOnnxOfflineRecognizerResult {
     text: *const c_char,
 }
 
-unsafe extern "C" {
-    fn SherpaOnnxCreateOfflineRecognizer(
-        config: *const SherpaOnnxOfflineRecognizerConfig,
-    ) -> *const SherpaOnnxOfflineRecognizer;
-    fn SherpaOnnxDestroyOfflineRecognizer(recognizer: *const SherpaOnnxOfflineRecognizer);
-    fn SherpaOnnxCreateOfflineStream(
-        recognizer: *const SherpaOnnxOfflineRecognizer,
-    ) -> *const SherpaOnnxOfflineStream;
-    fn SherpaOnnxDestroyOfflineStream(stream: *const SherpaOnnxOfflineStream);
-    fn SherpaOnnxAcceptWaveformOffline(
-        stream: *const SherpaOnnxOfflineStream,
-        sample_rate: i32,
-        samples: *const f32,
-        n: i32,
-    );
-    fn SherpaOnnxDecodeOfflineStream(
-        recognizer: *const SherpaOnnxOfflineRecognizer,
-        stream: *const SherpaOnnxOfflineStream,
-    );
-    fn SherpaOnnxGetOfflineStreamResult(
-        stream: *const SherpaOnnxOfflineStream,
-    ) -> *const SherpaOnnxOfflineRecognizerResult;
-    fn SherpaOnnxDestroyOfflineRecognizerResult(result: *const SherpaOnnxOfflineRecognizerResult);
-}
+// シンボルは `crate::dll::api()` が実行時に解決する。静的インポートにすると
+// プロセス起動時点で sherpa-onnx がロードされ、その時点で onnxruntime.dll の
+// 名前解決が走ってしまう (`src/dll.rs` 参照)。
 
 // ---------------------------------------------------------------------------
 // RAII ハンドル
@@ -275,8 +254,10 @@ impl Recognizer {
 impl Drop for Recognizer {
     fn drop(&mut self) {
         // SAFETY: `from_raw` が非 NULL を確認した所有ハンドルだけを保持する。
-        unsafe {
-            SherpaOnnxDestroyOfflineRecognizer(self.0);
+        if let Ok(api) = crate::dll::api() {
+            unsafe {
+                (api.destroy_offline_recognizer)(self.0.cast());
+            }
         }
     }
 }
@@ -291,17 +272,20 @@ struct StreamGuard(*const SherpaOnnxOfflineStream);
 impl StreamGuard {
     /// ストリームを作成する。作成できなければ `None`。
     fn create(recognizer: *const SherpaOnnxOfflineRecognizer) -> Option<Self> {
+        let api = crate::dll::api().ok()?;
         // SAFETY: recognizer は有効なハンドル。
-        let ptr = unsafe { SherpaOnnxCreateOfflineStream(recognizer) };
-        (!ptr.is_null()).then_some(Self(ptr))
+        let ptr = unsafe { (api.create_offline_stream)(recognizer.cast()) };
+        (!ptr.is_null()).then_some(Self(ptr.cast()))
     }
 }
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
         // SAFETY: `create` が非 NULL を確認したストリームのみ保持する。
-        unsafe {
-            SherpaOnnxDestroyOfflineStream(self.0);
+        if let Ok(api) = crate::dll::api() {
+            unsafe {
+                (api.destroy_offline_stream)(self.0.cast());
+            }
         }
     }
 }
@@ -312,8 +296,10 @@ struct ResultGuard(*const SherpaOnnxOfflineRecognizerResult);
 impl Drop for ResultGuard {
     fn drop(&mut self) {
         // SAFETY: 非 NULL の結果だけを保持する。
-        unsafe {
-            SherpaOnnxDestroyOfflineRecognizerResult(self.0);
+        if let Ok(api) = crate::dll::api() {
+            unsafe {
+                (api.destroy_result)(self.0.cast());
+            }
         }
     }
 }
@@ -331,6 +317,9 @@ pub(crate) struct Engine {
 impl Engine {
     /// 設定に応じてモデルを読み込み、認識器を初期化する。
     pub(crate) fn build(config: &Config) -> Result<Self, String> {
+        // DLL が解決できなければモデルの有無より先にここで落とす。
+        // 関数ポインタが無いまま進むと、どこで落ちるか分からないため。
+        crate::dll::api()?;
         match config.model.as_str() {
             "sensevoice" => Self::sense_voice(config),
             "reazonspeech" => Self::reazonspeech(config),
@@ -358,25 +347,29 @@ impl Engine {
             crate::warn!("オフラインストリームを作成できませんでした");
             return String::new();
         };
+        let Ok(api) = crate::dll::api() else {
+            crate::warn!("sherpa-onnx の関数を解決できませんでした");
+            return String::new();
+        };
         let sample_count = i32::try_from(samples.len()).unwrap_or(i32::MAX);
 
         // SAFETY: recognizer / stream は有効で、samples は呼び出し中有効。
         unsafe {
-            SherpaOnnxAcceptWaveformOffline(
-                stream.0,
+            (api.accept_waveform)(
+                stream.0.cast(),
                 self.sample_rate,
                 samples.as_ptr(),
                 sample_count,
             );
-            SherpaOnnxDecodeOfflineStream(self.recognizer.as_ptr(), stream.0);
+            (api.decode)(self.recognizer.as_ptr().cast(), stream.0.cast());
         }
 
         // SAFETY: stream は有効。結果の所有権は ResultGuard が引き継ぐ。
-        let raw_result = unsafe { SherpaOnnxGetOfflineStreamResult(stream.0) };
+        let raw_result = unsafe { (api.get_result)(stream.0.cast()) };
         if raw_result.is_null() {
             return String::new();
         }
-        let result = ResultGuard(raw_result);
+        let result = ResultGuard(raw_result.cast());
 
         // SAFETY: 結果は有効。`text` は NUL 終端か NULL。
         let ptr = unsafe { (*result.0).text };
@@ -836,8 +829,8 @@ fn create_sense_voice(config: &Config, model: &Path, tokens: &Path) -> Result<Re
     cfg.decoding_method = decoding.as_ptr();
 
     // SAFETY: cfg のポインタはすべて生存中の CString を指している。
-    let recognizer = unsafe { SherpaOnnxCreateOfflineRecognizer(&cfg) };
-    Recognizer::from_raw(recognizer)
+    let recognizer = unsafe { (crate::dll::api()?.create_offline_recognizer)(std::ptr::from_ref(&cfg).cast()) };
+    Recognizer::from_raw(recognizer.cast())
 }
 
 /// Transducer 用の C 設定を組み立てて認識器を作る。
@@ -876,8 +869,8 @@ fn create_transducer(
     cfg.decoding_method = decoding.as_ptr();
 
     // SAFETY: cfg のポインタはすべて生存中の CString を指している。
-    let recognizer = unsafe { SherpaOnnxCreateOfflineRecognizer(&cfg) };
-    Recognizer::from_raw(recognizer)
+    let recognizer = unsafe { (crate::dll::api()?.create_offline_recognizer)(std::ptr::from_ref(&cfg).cast()) };
+    Recognizer::from_raw(recognizer.cast())
 }
 
 /// Whisper 用の C 設定を組み立てて認識器を作る。
@@ -908,8 +901,8 @@ fn create_whisper(
     cfg.model_config.provider = provider.as_ptr();
 
     // SAFETY: cfg のポインタはすべて生存中の CString を指している。
-    let recognizer = unsafe { SherpaOnnxCreateOfflineRecognizer(&cfg) };
-    Recognizer::from_raw(recognizer)
+    let recognizer = unsafe { (crate::dll::api()?.create_offline_recognizer)(std::ptr::from_ref(&cfg).cast()) };
+    Recognizer::from_raw(recognizer.cast())
 }
 
 #[cfg(test)]

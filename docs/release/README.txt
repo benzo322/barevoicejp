@@ -195,6 +195,17 @@ PowerShell の場合:
   - logs\app.log にエラーが記録されている場合は、不具合報告に添付して
     ください。
 
+■ 「onnxruntime.dll が API v28 を提供していません」と表示される
+
+  Windows Update が C:\Windows\System32 に onnxruntime.dll を置いた場合に、
+  exe と同じフォルダの onnxruntime.dll より先に読み込まれることがあります。
+
+  - exe と同じフォルダに onnxruntime.dll があるか確認してください。
+    ZIP を展開したフォルダに BAREVoiceJP.exe と一緒に入っています。
+  - 不足している場合は ZIP を展開し直してください。
+  - logs\app.log に「onnxruntime <バージョン> / api28=true」と出ていれば
+    正しく読み込めています。
+
 ■ 録音できない / マイクが認識されない
 
   - 設定画面の「マイク」タブで入力デバイスを選択してください。

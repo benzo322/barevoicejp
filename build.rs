@@ -46,9 +46,20 @@ fn main() {
         );
     }
 
-    println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    println!("cargo:rustc-link-lib=dylib=sherpa-onnx-c-api");
-    println!("cargo:rerun-if-changed={}", import_lib.display());
+    // インポートライブラリはリンクしない。リンクするとプロセス起動時点で
+    // sherpa-onnx-c-api.dll が静的に束縛され、その時点で onnxruntime.dll の
+    // 名前解決が走る。Windows が System32 の古い ORT を優先すると
+    // OrtGetApiBase が NULL を返し、モデル読み込み時にアクセス違反で落ちる。
+    // シンボルは実行時に `src/dll.rs` が ORT → sherpa の順でロードして解決する。
+    let import_lib = lib_dir.join("sherpa-onnx-c-api.lib");
+    if !import_lib.is_file() {
+        println!(
+            "cargo:warning=sherpa-onnx のインポートライブラリが見つかりません: {}\n\
+             (実行時解決に切り替えたためリンクはしません)",
+            import_lib.display()
+        );
+    }
+    println!("cargo:rerun-if-changed={}", lib_dir.display());
 
     // 実行時に exe と同じディレクトリから DLL を解決できるようコピーする。
     let Ok(out_dir) = std::env::var("OUT_DIR") else {

@@ -11,8 +11,14 @@
 `build.rs` の仕事は3つ。
 
 - `app.ico` を exe のリソースとして埋め込む
-- `lib/sherpa-onnx-c-api.lib` をリンクする
 - `sherpa-onnx-c-api.dll` / `onnxruntime*.dll` を `target/<profile>/` と `deps/` へコピーする
+- `lib/sherpa-onnx-c-api.lib` の**存在だけ確認する**（リンクはしない）
+
+> **インポートライブラリをリンクしない理由**
+>
+> リンクするとプロセス起動時点で `sherpa-onnx-c-api.dll` が静的に束縛され、その時点で `onnxruntime.dll` の名前解決が走る。Windows 11 25H2 以降、`C:\Windows\System32\onnxruntime.dll`（OS 同梱の 1.17 系）が exe 隣の DLL より優先される事例があり、1.17 を掴むと `OrtGetApiBase()->GetApi(28)` が NULL を返してモデル読み込み時にアクセス違反で落ちる。
+>
+> そのためシンボルは実行時に `src/dll.rs` が **ORT → sherpa** の順でロードして解決する。`src/dll.rs` の `bundled_onnxruntime_supports_api_v28` テストが、この退行を検出する。
 
 ## ビルド
 
@@ -68,6 +74,7 @@ cargo test models::tests
 src/
   main.rs       エントリポイント (CLI → 設定 → エンジン → マイク → UI)
   config.rs     CLI 解析・設定・チューニング定数
+  dll.rs        sherpa-onnx / onnxruntime のロード順制御とシンボル解決
   engine.rs     sherpa-onnx の FFI ラッパーとモデル解決
   models.rs     モデル定義とダウンロード (tar.bz2 展開 / 直接ファイル配置)
   audio.rs      録音 (cpal)、リングバッファ
