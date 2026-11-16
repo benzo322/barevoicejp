@@ -81,18 +81,26 @@ jobs:
 
   # 常駐してキーボードをフックするバイナリを配布しているため、
   # 依存クレートの既知脆弱性を push / PR ごとに確認する。
+  #
+  # rustsec/audit-check はチェックランを作るため、フォーク元からの push などで
+  # checks: write が効かない文脈では "Not Found - checks/runs#update-a-check-run"
+  # で落ちる。ここでは cargo-audit を直接呼び、脆弱性の有無だけで判定する。
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
-      checks: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Audit dependencies
-        uses: rustsec/audit-check@v2.0.0
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          tool: cargo-audit
+
+      # 脆弱性 (vulnerabilities) があれば失敗する。
+      # unmaintained / unsound の警告は失敗にしない (依存の都合で直せないことがある)。
+      - name: Audit dependencies
+        run: cargo audit --file ./Cargo.lock
