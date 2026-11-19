@@ -1,7 +1,7 @@
 //! 最小ロガー。stderr と `logs/app.log` の両方へ出力する。
 //!
 //! リリースビルドは Windows GUI サブシステムで起動するためコンソールが無い。
-//! その場合でもログを失わないよう、exe と同じディレクトリの
+//! その場合でもログを失わないよう、データルートの
 //! `logs/app.log` へ常に書き出す。1 ファイル 5 MiB、バックアップ 3 世代で
 //! ローテーションする。
 //!
@@ -17,8 +17,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::Duration;
 
-/// ログファイルを置くディレクトリ (exe と同じ場所)。
-const LOG_DIR: &str = "logs";
 /// 現在のログファイル名。
 const LOG_FILE_NAME: &str = "app.log";
 /// 1 ファイルの上限 (5 MiB)。
@@ -115,13 +113,10 @@ fn backup_path(path: &Path, index: u32) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// ログファイルの絶対パス。exe の隣に置くため、カレントディレクトリに依存しない。
+/// ログファイルの絶対パス。データルート配下の `logs` を使うため、
+/// カレントディレクトリに依存しない。
 fn log_path() -> PathBuf {
-    let dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."));
-    dir.join(LOG_DIR).join(LOG_FILE_NAME)
+    crate::config::logs_dir().join(LOG_FILE_NAME)
 }
 
 /// デバッグログの出力可否を設定し、ファイル出力を開く。

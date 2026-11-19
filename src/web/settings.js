@@ -339,7 +339,77 @@ function renderControls() {
     ? `<b>ダウンロード先</b> <span title="${esc(paths.models)}">${esc(paths.models)}</span><br>${sourceLine}`
     : sourceLine;
   $("#configPath").textContent = paths.config || "";
-  $("#version").textContent = `v${state.version || "0.2.0"}`;
+}
+
+// セルフアップデートの状態・進捗・ボタンを同期する。
+function renderUpdate() {
+  if (!state) return;
+  const update = state.update || {};
+  const phase = update.phase || "idle";
+  const latest = update.latest
+    ? (String(update.latest).startsWith("v") ? String(update.latest) : `v${update.latest}`)
+    : "";
+  const busy = phase === "checking" || phase === "downloading"
+    || phase === "verifying" || phase === "extracting" || phase === "applying";
+
+  $("#version").textContent = `v${update.current || state.version || "0.0.0"}`;
+
+  const soundBadge = $("#soundTabBadge");
+  soundBadge.hidden = !update.hasUpdate;
+  const soundTab = $('.tab[data-tab="sound"]');
+  if (soundTab) {
+    soundTab.title = update.hasUpdate && latest
+      ? `${latest} が利用可能です`
+      : "";
+  }
+
+  const badge = $("#updateBadge");
+  badge.className = "badge";
+  let badgeText = "未確認";
+  if (phase === "checking") badgeText = "確認中";
+  else if (phase === "up_to_date") { badgeText = "最新版"; badge.classList.add("green"); }
+  else if (phase === "available") { badgeText = "更新あり"; badge.classList.add("recommend"); }
+  else if (busy) { badgeText = "更新中"; badge.classList.add("warn"); }
+  else if (phase === "failed") { badgeText = "エラー"; badge.classList.add("warn"); }
+  badge.textContent = badgeText;
+
+  const messages = {
+    idle: "「更新を確認」で GitHub Releases の最新版を確認できます。",
+    checking: "最新版を確認しています…",
+    up_to_date: latest ? `最新版です (${latest})。` : "最新版です。",
+    available: latest
+      ? `${latest} が利用可能です。アップデートを実行するとアプリが再起動します。`
+      : "新しいバージョンが利用可能です。",
+    downloading: latest ? `${latest} をダウンロードしています…` : "ダウンロードしています…",
+    verifying: "ダウンロードしたファイルの SHA-256 を検証しています…",
+    extracting: "ZIP を展開しています…",
+    applying: "更新を適用して再起動します…",
+    failed: update.error || "更新に失敗しました。"
+  };
+  $("#updateStatus").textContent = messages[phase] || messages.idle;
+
+  const downloading = phase === "downloading";
+  const percent = downloading && update.total > 0
+    ? Math.min(100, (update.downloaded / update.total) * 100)
+    : (phase === "verifying" || phase === "extracting" || phase === "applying" ? 100 : 0);
+  const showProgress = downloading || phase === "verifying"
+    || phase === "extracting" || phase === "applying";
+  $("#updateProgress").hidden = !showProgress;
+  $("#updateBar").style.width = `${percent.toFixed(1)}%`;
+  $("#updateNote").textContent = downloading
+    ? "ダウンロード中"
+    : (phase === "applying" ? "適用中" : "処理中");
+  $("#updatePercent").textContent = downloading
+    ? `${Math.round(percent)}%`
+    : "";
+
+  const checkButton = $("#checkUpdateBtn");
+  checkButton.disabled = busy;
+  checkButton.textContent = phase === "checking" ? "確認中…" : "更新を確認";
+
+  const applyButton = $("#applyUpdateBtn");
+  applyButton.hidden = !(update.latest && (phase === "available" || phase === "failed"));
+  applyButton.disabled = busy;
 }
 
 // 受信した状態を各セクションへ反映する。
@@ -352,6 +422,7 @@ function render() {
   renderHistory();
   renderDevices();
   renderWords();
+  renderUpdate();
   if (state.notice && state.notice.id !== lastNotice) {
     lastNotice = state.notice.id;
     toast(state.notice.message, state.notice.kind);
@@ -603,6 +674,18 @@ $("#openWords").addEventListener("click", event => {
 $("#openReplacements").addEventListener("click", event => {
   event.preventDefault();
   ipc({ cmd: "open_replacements" });
+});
+
+$("#checkUpdateBtn").addEventListener("click", () => {
+  if (!state) return;
+  ipc({ cmd: "check_update" });
+});
+
+$("#applyUpdateBtn").addEventListener("click", () => {
+  if (!state) return;
+  if (confirm("最新版へ更新してアプリを再起動します。よろしいですか？")) {
+    ipc({ cmd: "apply_update" });
+  }
 });
 
 $("#minBtn").addEventListener("click", () => ipc({ cmd: "window", action: "minimize" }));

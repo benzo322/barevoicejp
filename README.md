@@ -36,7 +36,7 @@
 
 ## インストール
 
-[Releases](../../releases) の `BAREVoiceJP-vX.Y.Z-win64.zip` を任意のフォルダへ展開し、`BAREVoiceJP.exe` を実行する。管理者権限は不要。ZIP を展開したフォルダが、そのまま設定・辞書・モデル・ログの保存先になる。
+[Releases](../../releases) の `BAREVoiceJP-vX.Y.Z-win64.zip` を任意のフォルダへ展開し、`BAREVoiceJP.exe` を実行する。管理者権限は不要。設定・辞書・履歴・モデル・ログは `%APPDATA%\BAREVoiceJP\` に保存されるため、ZIP を新しいフォルダへ展開し直してもデータは引き継がれる。
 
 1. ZIP を展開する
 2. `BAREVoiceJP.exe` を起動し、オンボーディングで使用するモデルを選択してダウンロードする (進捗は設定画面に表示)
@@ -44,13 +44,13 @@
 
 SmartScreen の警告が出た場合は「詳細情報」→「実行」を選ぶ。詳しい手順と SHA256 の確認方法は、ZIP 同梱の `README.txt` を参照。
 
-アンインストールは、設定画面で自動起動をオフにしたうえでアプリを終了し、展開したフォルダを削除する。
+アンインストールは、設定画面で自動起動をオフにしたうえでアプリを終了し、展開したフォルダを削除する。設定・履歴・モデルも消す場合は `%APPDATA%\BAREVoiceJP\` を削除する。
 
 ## ソースからビルド
 
 ### 前提
 
-- Rust stable (**edition 2024** / Rust 1.85 以降)
+- Rust stable (**edition 2024** / Rust 1.88 以降)
 - Visual Studio Build Tools (MSVC ツールチェーン)
 - [sherpa-onnx v1.13.8 win-x64 shared MD Release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/v1.13.8) を展開し、リポジトリ直下に `sherpa-onnx-v1.13.8-win-x64-shared-MD-Release/` として配置
 
@@ -67,9 +67,9 @@ cargo build --release
 .\target\release\BAREVoiceJP.exe
 ```
 
-リリースビルドは Windows の GUI サブシステムでリンクされるため、起動時にコンソールウィンドウは開かない。ログは exe と同じディレクトリの `logs\app.log` に出力される (下記「ログ」参照)。
+リリースビルドは Windows の GUI サブシステムでリンクされるため、起動時にコンソールウィンドウは開かない。ログは `%APPDATA%\BAREVoiceJP\logs\app.log` に出力される (下記「ログ」参照)。
 
-モデルは初回起動時に設定画面からダウンロードする。手動で配置する場合は `models/<モデル名>/` に展開する。
+モデルは初回起動時に設定画面からダウンロードする。手動で配置する場合は `%APPDATA%\BAREVoiceJP\models\<モデル名>\` に展開する。データの保存先を変えて開発する場合は、環境変数 `BAREVOICEJP_DATA_DIR` に任意のフォルダを指定する。
 
 ### テスト
 
@@ -103,6 +103,8 @@ iscc installer.iss
 
 タグと `Cargo.toml` の `version` は一致している必要がある。モデル本体は同梱しない。
 
+**セルフアップデートの必須条件:** アプリは `releases/latest` の `BAREVoiceJP-<tag>-win64.zip` と `BAREVoiceJP-<tag>-win64.zip.sha256` を探す。この 2 つを必ず同じリリースへ添付すること。ZIP 直下は `BAREVoiceJP/` フォルダとし、その中に `BAREVoiceJP.exe` と 3 つの DLL (`sherpa-onnx-c-api.dll` / `onnxruntime.dll` / `onnxruntime_providers_shared.dll`) を含める。`.sha256` は `<64桁の16進>  <ファイル名>` 形式 (release.yml が生成する形式)。
+
 ## 使い方
 
 - **録音**: 右 Alt を押している間。離すと推論して `Ctrl+V` を送信
@@ -113,43 +115,61 @@ iscc installer.iss
 
 ### データの置き場所
 
-モデル・辞書・設定・履歴・ログはすべて **exe と同じディレクトリ** (`models/` の親) に置かれる。自動起動時もカレントディレクトリに依存しない。
+モデル・辞書・設定・履歴・ログはすべて **`%APPDATA%\BAREVoiceJP\`** に置かれる。exe を別のフォルダへ移したり、新しい ZIP を展開し直しても、このフォルダを消さない限りデータは残る。
 
 ```
-BAREVoiceJP.exe
-config.toml          # 設定 (UI が自動生成・保存)
-stats.json           # 累積実績 (文字数と発話回数のみ)
-history.json         # 認識履歴 (直近10件、本文を含む)
-words.txt            # 辞書 (正式表記 : 代表読み)
-replacements.json    # 完全一致置換 (かな → 英字)
-hotwords.txt         # ホットワード (現行エンジンは未対応)
-models/
-  sherpa-onnx-.../
-logs/
-  app.log            # 実行ログ (5 MiB でローテーション)
-  app.log.1 … app.log.3
+%APPDATA%\BAREVoiceJP\
+  config.toml          # 設定 (UI が自動生成・保存)
+  stats.json           # 累積実績 (文字数と発話回数のみ)
+  history.json         # 認識履歴 (直近10件、本文を含む)
+  words.txt            # 辞書 (正式表記 : 代表読み)
+  replacements.json    # 完全一致置換 (かな → 英字)
+  hotwords.txt         # ホットワード (現行エンジンは未対応)
+  models\
+    sherpa-onnx-...\
+  logs\
+    app.log            # 実行ログ (5 MiB でローテーション)
+    app.log.1 … app.log.3
+  updates\             # セルフアップデートの一時ファイル
 ```
 
-インストーラー版では `%LOCALAPPDATA%\Programs\BAREVoiceJP\logs\app.log` になる。
+旧バージョン (0.2.0 以前) が exe の隣へ保存していたデータは、初回起動時に自動で `%APPDATA%\BAREVoiceJP\` へ引き継がれる。既存ファイルは上書きせず、`models\` は移動 (同一ドライブでない場合はコピー) する。移行後も旧ファイルは削除されないため、内容を確認してから手動で削除できる。
+
+exe と同じフォルダに空の `portable.txt` を置くと、ポータブルモードとして `%APPDATA%` を使わず exe の隣へ保存する。USB メモリなどで持ち運ぶ場合に使う。
+
+### アップデート
+
+設定画面の「サウンド」タブにある「アップデート」から、GitHub Releases の最新版を確認して適用できる。起動から約 5 秒後にもバックグラウンドで確認する (オフライン時は何も表示しない)。
+
+- 「更新を確認」は `https://api.github.com/repos/benzo322/barevoicejp/releases/latest` を読み、`Cargo.toml` のバージョンと比較する
+- 更新がある場合は `BAREVoiceJP-vX.Y.Z-win64.zip` と同名の `.sha256` をダウンロードし、ハッシュを検証してから展開する
+- 更新を検知すると、トレイのバルーン通知と右クリックメニューの「アップデートあり (vX.Y.Z)」で知らせる。通知は同じバージョンにつきアプリ起動中 1 回だけ
+- 通知またはメニュー項目をクリックすると、設定画面の「サウンド」タブ (アップデートカード) が開く。設定画面を開いている間は「サウンド」タブに「更新」バッジを表示する
+- 適用時はアプリを終了し、ヘルパースクリプトが `BAREVoiceJP.exe` と同梱 DLL を差し替えて再起動する。失敗時は旧ファイルへ戻して元のバージョンで起動する
+- インストール先に書き込めない場合 (Program Files など) は適用せず、エラーを表示する
+
+データは `%APPDATA%\BAREVoiceJP\` にあるため、アップデートで設定・履歴・モデルが失われることはない。
 
 ### ログ
 
-リリースビルドは GUI サブシステムのためコンソールを持たない。`INFO` / `WARNING` / `ERROR` とパニック内容は `logs\app.log` に常時出力される。`--debug` 指定時は `DEBUG` も記録する。
+リリースビルドは GUI サブシステムのためコンソールを持たない。`INFO` / `WARNING` / `ERROR` とパニック内容は `%APPDATA%\BAREVoiceJP\logs\app.log` に常時出力される。`--debug` 指定時は `DEBUG` も記録する。アップデートの適用結果は `logs\update.log` に残る。
 
 - 1 ファイル 5 MiB、`app.log.1`〜`app.log.3` の 3 世代を保持
 - コンソールから起動した場合は stderr にも同じ内容を出力
 - 書き込み失敗やログ出力自体の失敗でアプリは停止しない
 - 推論時間は `推論時間: <n> ms` の行に記録される。モデルごとの速度はこの行を集計して比べられる
 
-**認識結果や音声データそのものはログへ出力しない。** `--debug` でも音声の内容は残らず、認識結果は文字数のみを記録する。辞書・設定・モデルは exe と同じディレクトリに置かれ、音声はディスクへ保存しない。
+**認識結果や音声データそのものはログへ出力しない。** `--debug` でも音声の内容は残らず、認識結果は文字数のみを記録する。辞書・設定・モデルは `%APPDATA%\BAREVoiceJP\` に置かれ、音声はディスクへ保存しない。
 
 ## セキュリティとプライバシー
 
 - 推論はローカルで完結し、音声・認識結果を外部サービスへ送信しない
+- 外部通信はモデルのダウンロードと、GitHub Releases への更新確認だけ。更新確認はバージョン情報の取得のみで、利用状況や識別子を送信しない
 - 音声はメモリ上のリングバッファだけに保持し、ファイルへ書き出さない
 - `stats.json` に保存するのは文字数と貼り付け回数だけで、累積実績に認識結果の本文は保存しない
 - 認識結果の本文は `history.json` に直近10件だけ保存される。設定画面の「履歴」タブから全件クリアできる
 - モデルは配布元から取得後、必ずサイズと SHA-256 を検証してから展開・配置する。カスタム配布元は `checksums.sha256`、公式配布元はバイナリへ埋め込んだ SHA-256 と照合する
+- アップデートも配布 ZIP の SHA-256 を検証し、ZIP 内のルート直下にある実行ファイルと DLL だけを展開する。パス区切りを含むエントリは拒否する
 - リモートの配布元は HTTPS を必須とし、HTTPS → HTTP のリダイレクトも拒否する（平文 HTTP はループバック検証時のみ）
 - アーカイブの受信・展開サイズに上限を設け、圧縮爆弾によるディスク枯渇を防ぐ
 - 設定画面の WebView は埋め込みページ以外への遷移、新しいウィンドウ、権限要求を拒否する
@@ -157,7 +177,7 @@ logs/
 - 自動起動は `HKCU` の `Run` のみを使用し、管理者権限を要求しない
 - 貼り付け後に元のクリップボードへ戻すには `--restore-clipboard`（既定 OFF）を有効にする
 - `model_base_url` に認証情報を含める場合は、`config.toml` に平文で残る点に注意する（ログと設定画面では伏せる）
-- 旧バージョンの `logs/app.log` には認識結果が残っている可能性があるため、展開前に既存ログを削除する
+- 旧バージョン (0.2.0 以前) の `logs/app.log` には認識結果が残っている可能性がある。`%APPDATA%\BAREVoiceJP\logs\` へ移行した後、必要に応じて削除する
 
 ## モデル
 
@@ -180,10 +200,10 @@ logs/
 
 #### 設定ファイルとキー
 
-設定ファイルは **exe と同じディレクトリの `config.toml`**。インストーラー版では次の場所になる。
+設定ファイルは **`%APPDATA%\BAREVoiceJP\config.toml`**。設定画面で自動生成される。エディタで開く場合は、設定画面の「サウンド」タブに表示されるパスを使う。
 
 ```
-%LOCALAPPDATA%\Programs\BAREVoiceJP\config.toml
+%APPDATA%\BAREVoiceJP\config.toml
 ```
 
 キーは **`model_base_url`** 1つ。空なら公式配布元 (sherpa-onnx GitHub / Hugging Face) から直接ダウンロードし、値を入れるとその配布元を使う。`config.toml` を開き、次の行を追加または変更する（アプリ再起動後に反映）。
@@ -373,7 +393,7 @@ ASR が返す読みを完全一致で置換する。
 
 ## 累積実績 (`stats.json`)
 
-設定画面のステータスカードに、音声入力の累積実績を表示する。`config.toml` と同じディレクトリの `stats.json` に、次の数値だけを保存する。
+設定画面のステータスカードに、音声入力の累積実績を表示する。`%APPDATA%\BAREVoiceJP\stats.json` に、次の数値だけを保存する。
 
 | キー | 内容 |
 |---|---|
@@ -390,7 +410,7 @@ ASR が返す読みを完全一致で置換する。
 
 ## 認識履歴 (`history.json`)
 
-確定した認識テキストを、ローカル日時・使用モデル名とともに直近10件だけ保存する。保存先は `config.toml` と同じディレクトリの `history.json`。
+確定した認識テキストを、ローカル日時・使用モデル名とともに直近10件だけ保存する。保存先は `%APPDATA%\BAREVoiceJP\history.json`。
 
 - 設定画面の「履歴」タブに新しい順で表示される
 - 各行のコピーボタンで、そのテキストをクリップボードへ送る
@@ -450,9 +470,10 @@ cargo run --release -- --eval tests/text_cases.json --sweep
 ```
 src/
   main.rs       エントリポイント (CLI → 設定 → エンジン → マイク → UI)
-  config.rs     CLI解析・設定・チューニング定数
+  config.rs     CLI解析・設定・データ保存先 (%APPDATA%) と旧データ移行
   engine.rs     sherpa-onnx の FFI ラッパーとモデル解決
   models.rs     モデル定義とダウンロード (tar.bz2 展開 / 直接ファイル配置)
+  update.rs     セルフアップデート (GitHub Releases / ZIP / 差し替え)
   audio.rs      録音 (cpal)、リングバッファ、無音判定
   text.rs       テキスト整形と辞書 (words / replacements / hotwords)
   app.rs        録音 → 推論 → 貼り付けのパイプライン

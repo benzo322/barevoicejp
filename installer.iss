@@ -2,7 +2,7 @@
 ; 一般ユーザー権限で {localappdata}\Programs\BAREVoiceJP へインストールする。
 
 #define MyAppName "BAREVoiceJP"
-#define MyAppVersion "0.2.0"
+#define MyAppVersion "0.3.0"
 #define MyAppExeName "BAREVoiceJP.exe"
 
 [Setup]
@@ -24,7 +24,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-VersionInfoVersion=0.2.0.0
+VersionInfoVersion=0.3.0.0
 VersionInfoCompany={#MyAppName}
 VersionInfoDescription={#MyAppName} Setup
 VersionInfoProductName={#MyAppName}
@@ -41,7 +41,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "target\release\*.dll"; DestDir: "{app}"; Flags: ignoreversion
 
-; ユーザーが編集する辞書・置換設定 (アップグレード時は既存ファイルを残す)
+; 初回起動時に %APPDATA%\BAREVoiceJP へ引き継ぐ既定辞書。
+; ユーザーの編集内容はデータフォルダ側に保存される。
 Source: "words.txt"; DestDir: "{app}"; Flags: onlyifdoesntexist
 Source: "replacements.json"; DestDir: "{app}"; Flags: onlyifdoesntexist
 
@@ -50,10 +51,6 @@ Source: "replacements.json"; DestDir: "{app}"; Flags: onlyifdoesntexist
 Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "docs\release\README.txt"; DestDir: "{app}"; DestName: "README.txt"; Flags: ignoreversion
 Source: "docs\release\THIRD-PARTY-LICENSES.txt"; DestDir: "{app}"; DestName: "THIRD-PARTY-LICENSES.txt"; Flags: ignoreversion
-
-[Dirs]
-; モデル本体は同梱せず、初回起動後にアプリがダウンロードする。
-Name: "{app}\models"
 
 [Icons]
 Name: "{userprograms}\{#MyAppName}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"

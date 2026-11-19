@@ -4,6 +4,7 @@
 //! tao のイベントループへ転送する。
 
 use std::mem::size_of;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -12,8 +13,9 @@ use tao::event_loop::EventLoopProxy;
 use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{
-    NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_SETVERSION,
-    NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY, NIM_SETVERSION, NIN_BALLOONUSERCLICK, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
@@ -33,8 +35,76 @@ const ICON_ID: u32 = 1;
 const MENU_SETTINGS: usize = 1001;
 const MENU_RELOAD: usize = 1002;
 const MENU_EXIT: usize = 1003;
+const MENU_UPDATE: usize = 1004;
 
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
+/// 右クリックメニューに出す更新版。UI スレッドが設定し、トレイスレッドが読む。
+static UPDATE_VERSION: Mutex<Option<String>> = Mutex::new(None);
+
+fn update_version() -> Option<String> {
+    UPDATE_VERSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// トレイメニューへ表示する更新版を設定する。`None` で項目を消す。
+pub(crate) fn set_update_available(version: Option<&str>) {
+    if let Some(version) = version {
+        crate::info!("トレイメニューに更新を表示: {}", version_label(version));
+    }
+    *UPDATE_VERSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = version.map(ToString::to_string);
+}
+
+/// `v` の重複を避けて表示用のバージョン文字列にする。
+fn version_label(version: &str) -> String {
+    let bare = version.trim().trim_start_matches(['v', 'V']);
+    format!("v{bare}")
+}
+
+fn update_menu_text(version: &str) -> String {
+    format!("アップデートあり ({})", version_label(version))
+}
+
+/// タスクトレイのバルーン通知で更新を知らせる。
+///
+/// トレイアイコンが未登録、または通知が無効な環境では何もしない。
+pub(crate) fn notify_update(version: &str) {
+    let hwnd = TRAY_HWND.load(Ordering::SeqCst);
+    if hwnd == 0 {
+        return;
+    }
+    let title = wide("BAREVoiceJP のアップデートがあります");
+    let body = wide(&format!(
+        "新バージョン {} が利用可能です。設定画面から更新できます。",
+        version_label(version)
+    ));
+    // SAFETY: hwnd はトレイスレッドが登録した隠しウィンドウ。文字列は
+    // NUL 終端で、コピー先のバッファ長を超えない範囲だけ書き込む。
+    unsafe {
+        let mut data: NOTIFYICONDATAW = std::mem::zeroed();
+        data.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+        data.hWnd = hwnd as HWND;
+        data.uID = ICON_ID;
+        data.uFlags = NIF_INFO;
+        data.dwInfoFlags = NIIF_INFO;
+        data.Anonymous.uTimeout = 10_000;
+        let title_len = title.len().min(data.szInfoTitle.len() - 1);
+        data.szInfoTitle[..title_len].copy_from_slice(&title[..title_len]);
+        let body_len = body.len().min(data.szInfo.len() - 1);
+        data.szInfo[..body_len].copy_from_slice(&body[..body_len]);
+        if Shell_NotifyIconW(NIM_MODIFY, &data) == 0 {
+            crate::warn!(
+                "アップデート通知を表示できません: {}",
+                version_label(version)
+            );
+        } else {
+            crate::info!("アップデート通知を表示しました: {}", version_label(version));
+        }
+    }
+}
 
 /// トレイアイコンを削除してトレイスレッドを終了させる。
 pub(crate) fn shutdown() {
@@ -193,6 +263,9 @@ unsafe extern "system" fn wnd_proc(
                     WM_RBUTTONUP => unsafe {
                         show_menu(hwnd, ctx);
                     },
+                    NIN_BALLOONUSERCLICK => {
+                        let _ = ctx.proxy.send_event(UiEvent::ShowUpdate);
+                    }
                     _ => {}
                 }
             }
@@ -203,6 +276,9 @@ unsafe extern "system" fn wnd_proc(
                 match wparam & 0xFFFF {
                     MENU_SETTINGS => {
                         let _ = ctx.proxy.send_event(UiEvent::ShowSettings);
+                    }
+                    MENU_UPDATE => {
+                        let _ = ctx.proxy.send_event(UiEvent::ShowUpdate);
                     }
                     MENU_RELOAD => {
                         let _ = ctx.proxy.send_event(UiEvent::ReloadDictionaries);
@@ -255,8 +331,15 @@ unsafe fn show_menu(hwnd: HWND, ctx: &TrayCtx) {
     let settings = wide("設定");
     let reload = wide("辞書の再読み込み");
     let exit = wide("終了");
+    let update = update_version();
+    let update_label = update.as_deref().map(update_menu_text);
     // SAFETY: メニューと文字列は呼び出し中有効。
     unsafe {
+        if let Some(label) = &update_label {
+            let label = wide(label);
+            AppendMenuW(menu, MF_STRING, MENU_UPDATE, label.as_ptr());
+            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        }
         AppendMenuW(menu, MF_STRING, MENU_SETTINGS, settings.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
         AppendMenuW(menu, MF_STRING, MENU_RELOAD, reload.as_ptr());
@@ -277,6 +360,9 @@ unsafe fn show_menu(hwnd: HWND, ctx: &TrayCtx) {
         match command as usize {
             MENU_SETTINGS => {
                 let _ = ctx.proxy.send_event(UiEvent::ShowSettings);
+            }
+            MENU_UPDATE => {
+                let _ = ctx.proxy.send_event(UiEvent::ShowUpdate);
             }
             MENU_RELOAD => {
                 let _ = ctx.proxy.send_event(UiEvent::ReloadDictionaries);
@@ -364,4 +450,25 @@ fn ico_entry(icon: &[u8], target: u16) -> Option<&[u8]> {
         }
     }
     best.map(|(_, data)| data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_version_once_for_menu_and_balloon() {
+        assert_eq!(version_label("v0.3.0"), "v0.3.0");
+        assert_eq!(version_label("0.3.0"), "v0.3.0");
+        assert_eq!(version_label("V0.3.0"), "v0.3.0");
+        assert_eq!(update_menu_text("0.3.0"), "アップデートあり (v0.3.0)");
+    }
+
+    #[test]
+    fn update_menu_state_roundtrips() {
+        set_update_available(Some("v0.3.0"));
+        assert_eq!(update_version().as_deref(), Some("v0.3.0"));
+        set_update_available(None);
+        assert_eq!(update_version(), None);
+    }
 }

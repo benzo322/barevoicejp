@@ -1,6 +1,6 @@
 [package]
 name = "BAREVoiceJP"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 description = "超低遅延 Push-to-Talk 音声入力 (SenseVoice / sherpa-onnx)"
@@ -25,6 +25,7 @@ tiny-skia = { version = "0.12", default-features = false, features = ["std"] }
 toml = "1"
 ureq = { version = "3", default-features = false, features = ["native-tls"] }
 wry = "0.57"
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

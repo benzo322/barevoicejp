@@ -84,37 +84,198 @@ pub(crate) const MS_PER_SECOND: u64 = 1_000;
 /// 浮動小数で扱うミリ秒換算。
 pub(crate) const MS_PER_SECOND_F64: f64 = MS_PER_SECOND as f64;
 
-/// `models/` のルート。常に実行ファイルの隣を使う。
-///
-/// カレントディレクトリはショートカットの「開始位置」、共有フォルダ、
-/// System32 など起動元によって変わるため、参照すると辞書・設定・モデルの
-/// 読み込み先が起動文脈で入れ替わってしまう。
-/// `--model-dir` のような明示指定は `Config::model_dir_for` が別途扱う。
-pub(crate) fn models_root() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        return dir.join("models");
-    }
-    PathBuf::from("models")
+/// ユーザーデータを置くフォルダ名 (`%APPDATA%\BAREVoiceJP`)。
+const APP_DIR_NAME: &str = "BAREVoiceJP";
+/// exe と同じフォルダにこのファイルがあれば、ポータブルモードとして
+/// データを exe の隣へ置く。
+const PORTABLE_MARKER: &str = "portable.txt";
+/// データルートを明示的に差し替える環境変数 (開発・テスト用)。
+const DATA_DIR_ENV: &str = "BAREVOICEJP_DATA_DIR";
+
+/// 実行ファイルのあるディレクトリ。
+pub(crate) fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
 }
 
-/// データルート (models/ の親) をカレントディレクトリにする。
+/// ポータブルモードか (exe の隣に `portable.txt` がある)。
+pub(crate) fn portable_mode() -> bool {
+    exe_dir().is_some_and(|dir| dir.join(PORTABLE_MARKER).is_file())
+}
+
+/// ユーザーデータのルート。
 ///
-/// Windows の自動起動ではカレントディレクトリが System32 などになるため、
-/// `config.toml` / `words.txt` / `models/` を exe の隣で一貫して扱う。
-pub(crate) fn use_data_root() {
-    let Some(root) = models_root().parent().map(Path::to_path_buf) else {
+/// 優先順位:
+/// 1. `BAREVOICEJP_DATA_DIR` (開発・テスト用)
+/// 2. `portable.txt` がある場合は exe のディレクトリ
+/// 3. `%APPDATA%\BAREVoiceJP` (`LOCALAPPDATA` へのフォールバックあり)
+///
+/// カレントディレクトリはショートカットの「開始位置」など起動元で変わるため
+/// 参照しない。`--model-dir` の明示指定は `Config::model_dir_for` が扱う。
+pub(crate) fn data_root() -> PathBuf {
+    if let Some(dir) = std::env::var_os(DATA_DIR_ENV).filter(|value| !value.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    if portable_mode()
+        && let Some(dir) = exe_dir()
+    {
+        return dir;
+    }
+    for variable in ["APPDATA", "LOCALAPPDATA"] {
+        if let Some(dir) = std::env::var_os(variable).filter(|value| !value.is_empty()) {
+            return PathBuf::from(dir).join(APP_DIR_NAME);
+        }
+    }
+    // Windows 以外 (テスト・ビルド確認用)。
+    std::env::temp_dir().join(APP_DIR_NAME)
+}
+
+/// `models/` のルート。
+pub(crate) fn models_root() -> PathBuf {
+    data_root().join("models")
+}
+
+/// ログの出力先。
+pub(crate) fn logs_dir() -> PathBuf {
+    data_root().join("logs")
+}
+
+/// 旧バージョンが exe の隣に保存していたデータを新しいデータルートへ引き継ぐ。
+///
+/// 個別に存在確認するため、途中で失敗・中断しても次回起動で残りだけを
+/// 移行できる。既存ファイルは決して上書きしない。`models/` は同一ボリューム
+/// なら rename で移動し、失敗した場合は一時ディレクトリへコピーしてから
+/// rename する (途中で止まった不完全なコピーを残さない)。
+pub(crate) fn migrate_legacy_data(root: &Path) {
+    let Some(legacy) = exe_dir() else {
         return;
     };
-    if root.is_dir()
-        && let Err(exc) = std::env::set_current_dir(&root)
-    {
+    if legacy == root {
+        return;
+    }
+    migrate_data_from(&legacy, root);
+}
+
+/// `legacy` から `root` へ個別にコピーする (テスト可能な本体)。
+fn migrate_data_from(legacy: &Path, root: &Path) {
+    const FILES: [&str; 6] = [
+        "config.toml",
+        "history.json",
+        "stats.json",
+        "words.txt",
+        "replacements.json",
+        "hotwords.txt",
+    ];
+    for name in FILES {
+        let source = legacy.join(name);
+        let target = root.join(name);
+        if !source.is_file() || target.exists() {
+            continue;
+        }
+        // 途中で失敗した不完全なファイルを残さないよう、一時ファイルへ
+        // コピーしてから置き換える。既存ファイルは決して上書きしない。
+        let temp = root.join(format!("{name}.migrating"));
+        let _ = fs::remove_file(&temp);
+        let copied = fs::copy(&source, &temp).and_then(|bytes| {
+            fs::rename(&temp, &target)?;
+            Ok(bytes)
+        });
+        match copied {
+            Ok(bytes) => crate::info!(
+                "旧データを引き継ぎました: {} → {} ({bytes} バイト)",
+                source.display(),
+                target.display()
+            ),
+            Err(exc) => {
+                let _ = fs::remove_file(&temp);
+                crate::warn!(
+                    "旧データをコピーできません ({} → {}): {exc}",
+                    source.display(),
+                    target.display()
+                );
+            }
+        }
+    }
+
+    let source_models = legacy.join("models");
+    let target_models = root.join("models");
+    if !source_models.is_dir() || target_models.exists() {
+        return;
+    }
+    match fs::rename(&source_models, &target_models) {
+        Ok(()) => crate::info!(
+            "旧モデルフォルダを移動しました: {} → {}",
+            source_models.display(),
+            target_models.display()
+        ),
+        Err(rename_exc) => {
+            let staging = root.join("models.migrating");
+            let _ = fs::remove_dir_all(&staging);
+            match copy_dir_all(&source_models, &staging)
+                .and_then(|()| fs::rename(&staging, &target_models))
+            {
+                Ok(()) => {
+                    crate::info!(
+                        "旧モデルフォルダをコピーして引き継ぎました: {} → {}",
+                        source_models.display(),
+                        target_models.display()
+                    );
+                    // コピー元は残す。削除はユーザーが確認してから行う。
+                }
+                Err(exc) => {
+                    let _ = fs::remove_dir_all(&staging);
+                    crate::warn!(
+                        "旧モデルフォルダを引き継げません ({} → {}): \
+                         rename={rename_exc} / copy={exc}。\
+                         設定画面から再ダウンロードしてください。",
+                        source_models.display(),
+                        target_models.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// ディレクトリを再帰的にコピーする。シンボリックリンクは辿らない。
+fn copy_dir_all(source: &Path, target: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let destination = target.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_all(&entry.path(), &destination)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &destination)?;
+        }
+    }
+    Ok(())
+}
+
+/// データルートを用意し、旧データを移行してカレントディレクトリにする。
+///
+/// Windows の自動起動ではカレントディレクトリが System32 などになるため、
+/// 相対パスで扱う `config.toml` / `words.txt` / `models/` をデータルートへ
+/// 固定する。
+pub(crate) fn prepare_data_root() -> PathBuf {
+    let root = data_root();
+    if let Err(exc) = fs::create_dir_all(&root) {
+        crate::warn!(
+            "データディレクトリを作成できません ({}): {exc}",
+            root.display()
+        );
+        return root;
+    }
+    migrate_legacy_data(&root);
+    if let Err(exc) = std::env::set_current_dir(&root) {
         crate::warn!(
             "データディレクトリへ移動できません ({}): {exc}",
             root.display()
         );
     }
+    root
 }
 
 /// ログ表示用に URL の認証情報を伏せる。
@@ -927,10 +1088,86 @@ mod tests {
     }
 
     #[test]
-    fn models_root_lives_next_to_the_executable() {
-        let exe = std::env::current_exe().expect("実行ファイル");
-        let dir = exe.parent().expect("実行ファイルのディレクトリ");
-        assert_eq!(models_root(), dir.join("models"));
+    fn models_root_lives_under_the_data_root() {
+        assert_eq!(models_root(), data_root().join("models"));
+        assert_eq!(logs_dir(), data_root().join("logs"));
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("時刻")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "barevoicejp-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("一時ディレクトリ");
+        dir
+    }
+
+    #[test]
+    fn migration_copies_legacy_files_and_models_without_overwriting() {
+        let legacy = temp_dir("legacy");
+        let root = temp_dir("root");
+        fs::write(legacy.join("config.toml"), "hotkey = \"f9\"\n").expect("設定");
+        fs::write(legacy.join("history.json"), "{\"entries\":[]}").expect("履歴");
+        fs::write(legacy.join("stats.json"), "{}").expect("統計");
+        fs::write(legacy.join("words.txt"), "API : えーぴーあい\n").expect("辞書");
+        fs::write(legacy.join("replacements.json"), "{}").expect("置換");
+        fs::write(legacy.join("hotwords.txt"), "Docker\n").expect("ホットワード");
+        fs::create_dir_all(legacy.join("models").join("sensevoice")).expect("モデル");
+        fs::write(
+            legacy.join("models").join("sensevoice").join("tokens.txt"),
+            "a\n",
+        )
+        .expect("モデルファイル");
+
+        // 移行先に既にある設定は上書きしない。
+        fs::write(root.join("config.toml"), "hotkey = \"alt_r\"\n").expect("既存設定");
+
+        migrate_data_from(&legacy, &root);
+
+        assert_eq!(
+            fs::read_to_string(root.join("config.toml")).expect("設定"),
+            "hotkey = \"alt_r\"\n"
+        );
+        for name in [
+            "history.json",
+            "stats.json",
+            "words.txt",
+            "replacements.json",
+            "hotwords.txt",
+        ] {
+            assert!(root.join(name).is_file(), "{name} が移行されていない");
+        }
+        assert_eq!(
+            fs::read_to_string(root.join("models").join("sensevoice").join("tokens.txt"))
+                .expect("モデル"),
+            "a\n"
+        );
+        // 移行元は残す (ユーザーが確認してから削除できる)。
+        assert!(legacy.join("history.json").is_file());
+
+        fs::remove_dir_all(legacy).expect("後片付け");
+        fs::remove_dir_all(root).expect("後片付け");
+    }
+
+    #[test]
+    fn migration_skips_existing_models_directory() {
+        let legacy = temp_dir("legacy-models");
+        let root = temp_dir("root-models");
+        fs::create_dir_all(legacy.join("models").join("old")).expect("旧モデル");
+        fs::create_dir_all(root.join("models").join("new")).expect("新モデル");
+
+        migrate_data_from(&legacy, &root);
+
+        assert!(root.join("models").join("new").is_dir());
+        assert!(!root.join("models").join("old").exists());
+        assert!(legacy.join("models").join("old").is_dir());
+
+        fs::remove_dir_all(legacy).expect("後片付け");
+        fs::remove_dir_all(root).expect("後片付け");
     }
 
     #[test]

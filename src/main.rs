@@ -23,6 +23,7 @@ mod stats;
 mod text;
 mod tray;
 mod ui;
+mod update;
 mod win;
 
 use std::path::Path;
@@ -51,7 +52,7 @@ fn main() {
     if cfg!(debug_assertions) && !cli.console {
         win::hide_console();
     }
-    config::use_data_root();
+    config::prepare_data_root();
 
     if cli.sweep && cli.eval.is_none() {
         eprintln!("--sweep は --eval <JSON> と一緒に指定してください");

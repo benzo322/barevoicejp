@@ -788,7 +788,7 @@ fn find_whisper_tokens(dir: &Path) -> Option<PathBuf> {
 /// モデル未配置時の案内。外部 URL は示さず、配布元の設定を促す。
 const MODEL_DOWNLOAD_HINT: &str = "\
   設定画面の「モデル」タブからダウンロードしてください。\n\
-  配布元は exe と同じディレクトリの config.toml の model_base_url で指定します。\n";
+  配布元はデータフォルダの config.toml の model_base_url で指定します。\n";
 
 fn path_string(path: &Path) -> Result<CString, String> {
     CString::new(path.to_string_lossy().as_bytes())

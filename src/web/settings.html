@@ -22,6 +22,7 @@
     --shadow-soft:0 10px 30px -18px rgba(30,64,175,.25);
   }
   *{box-sizing:border-box}
+  [hidden]{display:none !important}
   html,body{height:100%;margin:0;overflow:hidden}
   body{
     font-family:"Segoe UI Variable Display","Segoe UI","Yu Gothic UI","Hiragino Sans",system-ui,-apple-system,sans-serif;
@@ -104,6 +105,8 @@
   .tab:focus{outline:none}
   .tab.active{color:#0f172a;background:#fff;box-shadow:0 6px 16px -10px rgba(30,64,175,.4), inset 0 0 0 1px rgba(255,255,255,.9)}
   .tab.active svg{color:#4f46e5;opacity:1}
+  .tab-badge{margin-left:4px;padding:3px 6px;border-radius:99px;font-size:9px;font-weight:700;letter-spacing:.04em;line-height:1;color:#fff;
+    background:linear-gradient(120deg,#38bdf8,#6366f1);box-shadow:0 4px 10px -5px rgba(79,70,229,.7)}
   .panel{display:none;flex:1 0 auto;min-height:0;animation:fade .32s ease both}
   .panel.active{display:block}
   .grid{display:grid;gap:14px}
@@ -390,6 +393,7 @@
     </button>
     <button class="tab" data-tab="sound">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg>サウンド
+      <span class="tab-badge" id="soundTabBadge" hidden>更新</span>
     </button>
     <button class="tab" data-tab="guide">
       <span class="tab-emoji" aria-hidden="true">💡</span>ガイド
@@ -560,10 +564,25 @@
           <button class="switch" id="soundFinishToggle" role="switch"></button>
         </div>
         <div class="paths" id="aboutPaths" style="margin-top:12px"></div>
-        <div class="row" style="margin-top:8px">
-          <div><div class="row-label">バージョン</div></div>
-          <span class="keycap" id="version">0.2.0</span>
+      </article>
+      <article class="card" style="grid-column:1/-1">
+        <div class="card-head">
+          <div><h2>アップデート</h2><p class="sub">GitHub Releases から最新版を確認し、アプリ本体と同梱 DLL を更新します。</p></div>
+          <span class="badge" id="updateBadge">未確認</span>
         </div>
+        <div class="row" style="border-top:0;padding-top:0">
+          <div><div class="row-label">現在のバージョン</div><div class="row-desc">BAREVoiceJP (Windows x64)</div></div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <span class="keycap" id="version">v0.0.0</span>
+            <button class="btn" id="checkUpdateBtn">更新を確認</button>
+            <button class="btn primary" id="applyUpdateBtn" hidden>アップデート実行</button>
+          </div>
+        </div>
+        <div id="updateProgress" hidden>
+          <div class="progress"><i id="updateBar"></i></div>
+          <div class="progress-note"><span id="updateNote"></span><span id="updatePercent"></span></div>
+        </div>
+        <p class="sub" id="updateStatus" style="margin:8px 0 0"></p>
       </article>
     </div>
   </section>
@@ -673,8 +692,8 @@
             <h2>セキュリティ</h2>
           </div>
         </div>
-        <div class="stack-tech"><code>完全ローカル</code><code>外部送信ゼロ</code></div>
-        <p class="stack-desc">外部通信機能はゼロ。音声も認識結果も、この PC の外へは一切出ません。</p>
+        <div class="stack-tech"><code>音声送信ゼロ</code><code>モデル / 更新のみ通信</code></div>
+        <p class="stack-desc">音声も認識結果も外部へ送信しません。通信はモデルのダウンロードと更新確認だけです。</p>
       </article>
     </div>
   </section>

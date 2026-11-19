@@ -109,6 +109,10 @@ pub(crate) struct Shared {
     stats: Mutex<Stats>,
     /// 直近の認識テキスト (新しい順)。
     history: Mutex<History>,
+    /// セルフアップデートの確認・ダウンロード状態。
+    update: Mutex<crate::update::UpdateState>,
+    /// 更新確認/適用スレッドの二重起動防止。
+    update_busy: AtomicBool,
 }
 
 impl Shared {
@@ -169,6 +173,8 @@ impl Shared {
             pending_tap: Mutex::new(None),
             stats: Mutex::new(Stats::load(Path::new(stats::STATS_PATH))),
             history: Mutex::new(History::load(Path::new(history::HISTORY_PATH))),
+            update: Mutex::new(crate::update::UpdateState::default()),
+            update_busy: AtomicBool::new(false),
         })
     }
 
@@ -330,6 +336,31 @@ impl Shared {
             current.clone()
         };
         snapshot.save(Path::new(history::HISTORY_PATH))
+    }
+
+    /// 現在のセルフアップデート状態。
+    pub(crate) fn update_state(&self) -> crate::update::UpdateState {
+        lock(&self.update).clone()
+    }
+
+    /// 更新状態を書き換える。
+    pub(crate) fn update_mut<R>(
+        &self,
+        change: impl FnOnce(&mut crate::update::UpdateState) -> R,
+    ) -> R {
+        change(&mut lock(&self.update))
+    }
+
+    /// 更新確認/適用を開始できるか。既に実行中なら false。
+    pub(crate) fn begin_update(&self) -> bool {
+        self.update_busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    /// 更新確認/適用の終了を通知する。
+    pub(crate) fn end_update(&self) {
+        self.update_busy.store(false, Ordering::SeqCst);
     }
 
     /// 状態機械に合わせて表示状態を揃える。

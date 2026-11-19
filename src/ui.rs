@@ -29,17 +29,24 @@ use crate::sound;
 use crate::stats::Stats;
 use crate::text;
 use crate::tray;
+use crate::update;
 use crate::win;
 
 /// トレイ・ワーカー・IPC からメインスレッドへ送るイベント。
 pub(crate) enum UiEvent {
     ShowSettings,
+    /// 更新通知・トレイメニューから、サウンドタブ (アップデート) を開く。
+    ShowUpdate,
     /// 初回起動のオンボーディングで「はじめる」が押された。
     OnboardingDone,
     ReloadDictionaries,
     Ipc(String),
     Tick,
     ModelsChanged,
+    /// 更新確認・ダウンロードの状態が変化した。
+    UpdateChanged,
+    /// 更新の準備ができた。アプリを終了して差し替えスクリプトへ渡す。
+    ApplyUpdate,
     Quit,
 }
 
@@ -195,8 +202,29 @@ pub(crate) fn run(mut app: App) -> ! {
         })
         .ok();
 
+    // 起動直後はエンジン初期化とオンボーディングを優先し、数秒後に
+    // バックグラウンドで更新を確認する。オフライン時の失敗は UI に出さない。
+    {
+        let proxy = proxy.clone();
+        let shared = Arc::clone(app.shared());
+        std::thread::Builder::new()
+            .name("BAREVoiceJP-update-auto".to_string())
+            .spawn(move || {
+                std::thread::sleep(Duration::from_secs(5));
+                update::check(
+                    shared,
+                    move || {
+                        let _ = proxy.send_event(UiEvent::UpdateChanged);
+                    },
+                    true,
+                );
+            })
+            .ok();
+    }
+
     let mut notice: Option<Notice> = None;
     let mut notice_id = 0u64;
+    let mut notified_update: Option<String> = None;
     let mut last_state = Instant::now() - Duration::from_secs(1);
 
     event_loop.run(move |event, _target, control_flow| {
@@ -207,6 +235,13 @@ pub(crate) fn run(mut app: App) -> ! {
                 // ユーザーが選んだタブを維持する。
                 let tab = (!window.is_visible()).then(|| default_tab(&app, &settings));
                 show_window(&window, &webview, tab);
+                push_state(&webview, &app, &settings, &notice);
+                push_level(&webview, &app);
+            }
+            Event::UserEvent(UiEvent::ShowUpdate) => {
+                // 通知やトレイメニューから開いた場合は、更新カードのある
+                // サウンドタブへ直接移動する。
+                show_window(&window, &webview, Some("sound"));
                 push_state(&webview, &app, &settings, &notice);
                 push_level(&webview, &app);
             }
@@ -247,6 +282,19 @@ pub(crate) fn run(mut app: App) -> ! {
                     app.reconfigure();
                 }
                 push_state(&webview, &app, &settings, &notice);
+            }
+            Event::UserEvent(UiEvent::UpdateChanged) => {
+                sync_update_notification(&app, &mut notified_update);
+                push_state(&webview, &app, &settings, &notice);
+            }
+            Event::UserEvent(UiEvent::ApplyUpdate) => {
+                // 差し替えスクリプトはこの PID の終了を待っている。
+                // 「適用中」を描画させてから、ワーカー・マイク・トレイを止める。
+                push_state(&webview, &app, &settings, &notice);
+                std::thread::sleep(Duration::from_millis(700));
+                tray::shutdown();
+                app.shutdown();
+                std::process::exit(0);
             }
             Event::UserEvent(UiEvent::Ipc(message)) => {
                 handle_ipc(
@@ -578,6 +626,29 @@ fn handle_ipc(
             app.reload_dictionaries();
             set_notice(notice, notice_id, "success", "辞書を再読み込みしました");
         }
+        "check_update" => {
+            let proxy = proxy.clone();
+            update::check(
+                Arc::clone(app.shared()),
+                move || {
+                    let _ = proxy.send_event(UiEvent::UpdateChanged);
+                },
+                false,
+            );
+        }
+        "apply_update" => {
+            let proxy = proxy.clone();
+            let ready_proxy = proxy.clone();
+            update::apply(
+                Arc::clone(app.shared()),
+                move || {
+                    let _ = proxy.send_event(UiEvent::UpdateChanged);
+                },
+                move || {
+                    let _ = ready_proxy.send_event(UiEvent::ApplyUpdate);
+                },
+            );
+        }
         _ => {}
     }
 }
@@ -774,16 +845,16 @@ fn snapshot(app: &App, settings: &Settings, notice: &Option<Notice>) -> Value {
     } else {
         config::redact_source(&config.model_base_url)
     };
-    let paths = std::env::current_dir()
-        .map(|dir| {
-            json!({
-                "words": dir.join(text::WORDS_PATH).display().to_string(),
-                "config": dir.join(config::CONFIG_PATH).display().to_string(),
-                "models": config::models_root().display().to_string(),
-                "modelSource": &model_source,
-            })
+    let paths = {
+        let root = config::data_root();
+        json!({
+            "words": root.join(text::WORDS_PATH).display().to_string(),
+            "config": root.join(config::CONFIG_PATH).display().to_string(),
+            "models": config::models_root().display().to_string(),
+            "logs": config::logs_dir().display().to_string(),
+            "modelSource": &model_source,
         })
-        .unwrap_or_else(|_| json!({ "modelSource": &model_source }));
+    };
 
     json!({
         "settings": settings_for_ui(settings),
@@ -813,11 +884,46 @@ fn snapshot(app: &App, settings: &Settings, notice: &Option<Notice>) -> Value {
         "autostart": settings.autostart,
         "paths": paths,
         "version": env!("CARGO_PKG_VERSION"),
+        "update": update_for_ui(&shared.update_state()),
         "notice": notice.as_ref().map(|notice| json!({
             "id": notice.id,
             "kind": notice.kind,
             "message": notice.message,
         })),
+    })
+}
+
+/// トレイメニューとバルーン通知を更新状態へ同期する。
+///
+/// バルーンは同じバージョンにつき 1 回だけ出す。メニュー項目は更新が
+/// 無くなれば消える。
+fn sync_update_notification(app: &App, notified: &mut Option<String>) {
+    let state = app.shared().update_state();
+    let version = state
+        .latest
+        .as_deref()
+        .filter(|_| state.download_url.is_some());
+    tray::set_update_available(version);
+    if state.phase == update::UpdatePhase::Available
+        && let Some(version) = version
+        && notified.as_deref() != Some(version)
+    {
+        tray::notify_update(version);
+        *notified = Some(version.to_string());
+    }
+}
+
+/// セルフアップデートの UI DTO。アセット URL はレンダラーへ渡さない。
+fn update_for_ui(state: &update::UpdateState) -> Value {
+    json!({
+        "phase": state.phase.as_str(),
+        "current": &state.current,
+        "latest": &state.latest,
+        "releaseUrl": &state.release_url,
+        "hasUpdate": state.download_url.is_some(),
+        "downloaded": state.downloaded,
+        "total": state.total,
+        "error": &state.error,
     })
 }
 
