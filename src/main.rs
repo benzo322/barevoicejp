@@ -11,6 +11,7 @@
 mod app;
 mod audio;
 mod config;
+mod dll;
 mod engine;
 mod eval;
 mod history;
@@ -109,6 +110,13 @@ fn main() {
             "このビルドの貼り付けは Ctrl+V 固定です (指定: {}+{})",
             config.paste_modifier, config.paste_key
         );
+    }
+
+    // エンジン初期化より先に DLL を解決する。Windows が System32 の
+    // onnxruntime.dll を優先すると sherpa-onnx がアクセス違反で落ちるため、
+    // 同梱版を先に読み込んで順序を固定する (src/dll.rs 参照)。
+    if let Err(exc) = dll::preload() {
+        warn!("{exc}");
     }
 
     // エンジン初期化より先にテンプレートを用意する (リファレンスと同じ順序)。

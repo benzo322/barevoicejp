@@ -42,3 +42,4 @@ history.json
 # 実行時ログ (認識結果などの機密情報を含み得る)
 /logs/
 *.log
+pr-dll.md
