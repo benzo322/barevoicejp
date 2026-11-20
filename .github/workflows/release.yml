@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           # 手動実行時は指定されたタグを、タグ push 時はそのタグをビルドする。
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
@@ -113,7 +113,7 @@ jobs:
       # ビルド自体は Python を使わないが、リポジトリ内の補助スクリプト用に
       # 明示的に Python 3.12 を用意しておく。
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -286,7 +286,7 @@ jobs:
           Write-Host "SHA256: $hash"
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           name: BAREVoiceJP ${{ steps.tag.outputs.tag }}
