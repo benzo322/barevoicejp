@@ -95,7 +95,7 @@ src/
   logging.rs    ログ (stderr + logs/app.log の 5 MiB ローテーション)
   web/          設定画面・オンボーディング (HTML/CSS/JS)
 tests/text_cases.json   テキスト整形の評価ケース
-tools/make_icon.py      アイコン生成
+tools/build_icon.py     アイコン生成 (icon.svg / icon-small.svg -> icon.png / app.ico / favicon.png)
 docs/release/README.txt                 配布 ZIP 同梱の利用者向け README
 docs/release/THIRD-PARTY-LICENSES.txt   第三者ライセンス表記
 .github/workflows/ci.yml                Windows CI (fmt / clippy / test / MSRV / cargo audit)

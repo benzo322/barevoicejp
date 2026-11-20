@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs><clipPath id="sq"><path d="M512 0C132 0 0 132 0 512s132 512 512 512 512-132 512-512S892 0 512 0Z"/></clipPath></defs>
+  <path d="M512 0C132 0 0 132 0 512s132 512 512 512 512-132 512-512S892 0 512 0Z" fill="#16273F"/>
+
+  <!-- カプセル。16px で 4px 弱の幅を確保する。 -->
+  <rect x="388" y="150" width="248" height="392" rx="124" fill="#FFFFFF"/>
+  <!-- グリルは帯 1 本。5 本のバーは 16px で潰れて汚れる。 -->
+  <rect x="430" y="300" width="164" height="94" rx="47" fill="#38BDF8"/>
+  <!-- クレードル。カプセル幅 + 24 に抑える。 -->
+  <path d="M300 470a212 212 0 0 0 424 0" fill="none" stroke="#FFFFFF"
+        stroke-width="86" stroke-linecap="round"/>
+  <path d="M512 690v54" stroke="#FFFFFF" stroke-width="86" stroke-linecap="round"/>
+  <path d="M356 770h312" stroke="#38BDF8" stroke-width="96" stroke-linecap="round"/>
+</svg>

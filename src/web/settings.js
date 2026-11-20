@@ -75,7 +75,7 @@ function renderStats() {
   const totalChars = Number(stats.totalChars) || 0;
   $("#statTotalChars").textContent = formatCount(totalChars);
   $("#statTotalChars").title = `総音声入力: ${formatCount(totalChars)} 文字`;
-  $("#statSessions").textContent = `${formatCount(stats.totalSessions)} 回`;
+  $("#statSessions").textContent = formatCount(stats.totalSessions);
   $("#statTodayChars").textContent = formatCount(stats.todayChars);
   $("#statSaved").textContent = savedTimeLabel(stats.estimatedSavedMinutes);
 }
@@ -125,7 +125,6 @@ function setStatus() {
   const model = (state.models || []).find(item => item.id === state.settings.model);
   $("#heroModel").textContent = model ? model.name : state.settings.model;
   $("#heroHotkey").textContent = keyLabel(state.settings.hotkey);
-  $("#heroMode").textContent = "長押し / 2回押し";
 
   const caption = {
     idle: "待機中 — ホットキーを押すと波形が動きます",
@@ -328,6 +327,7 @@ function renderControls() {
     $("#volume").value = String(settings.sound_volume);
   }
   $("#volumeValue").textContent = `${Math.round(settings.sound_volume * 100)}%`;
+  paintVolume(settings.sound_volume);
 
   const paths = state.paths || {};
   $("#dictPaths").innerHTML = `<b>words.txt</b> ${esc(paths.words || "")}<br><b>config.toml</b> ${esc(paths.config || "")}`;
@@ -354,11 +354,13 @@ function renderUpdate() {
 
   $("#version").textContent = `v${update.current || state.version || "0.0.0"}`;
 
-  const soundBadge = $("#soundTabBadge");
-  soundBadge.hidden = !update.hasUpdate;
-  const soundTab = $('.tab[data-tab="sound"]');
-  if (soundTab) {
-    soundTab.title = update.hasUpdate && latest
+  const updateBadgeTab = $("#updateTabBadge");
+  if (updateBadgeTab) {
+    updateBadgeTab.hidden = !update.hasUpdate;
+  }
+  const generalTab = $('.tab[data-tab="general"]');
+  if (generalTab) {
+    generalTab.title = update.hasUpdate && latest
       ? `${latest} が利用可能です`
       : "";
   }
@@ -442,6 +444,13 @@ function toast(message, kind) {
 
 function levelPercent(value) {
   return Math.min(1, Math.sqrt(Math.max(0, value) * 9));
+}
+
+// スライダーの塗りを現在値まで伸ばす。WebKit は背景を自前で描くので JS で塗る。
+function paintVolume(value) {
+  const percent = Math.max(0, Math.min(1, Number(value) || 0)) * 100;
+  $("#volume").style.background =
+    `linear-gradient(90deg, var(--accent) ${percent}%, #e4e7ec ${percent}%)`;
 }
 
 // 入力レベルをメーターと波形へ反映する。
@@ -659,13 +668,11 @@ $("#soundFinishToggle").addEventListener("click", () => {
 $("#volume").addEventListener("input", event => {
   const value = Number(event.target.value);
   $("#volumeValue").textContent = `${Math.round(value * 100)}%`;
+  paintVolume(value);
 });
 $("#volume").addEventListener("change", event => {
   save({ sound_volume: Number(event.target.value) });
 });
-
-$("#previewStart").addEventListener("click", () => ipc({ cmd: "play_sound", kind: "start" }));
-$("#previewFinish").addEventListener("click", () => ipc({ cmd: "play_sound", kind: "finish" }));
 
 $("#openWords").addEventListener("click", event => {
   event.preventDefault();

@@ -35,7 +35,7 @@ use crate::win;
 /// トレイ・ワーカー・IPC からメインスレッドへ送るイベント。
 pub(crate) enum UiEvent {
     ShowSettings,
-    /// 更新通知・トレイメニューから、サウンドタブ (アップデート) を開く。
+    /// 更新通知・トレイメニューから、一般タブ (アップデート) を開く。
     ShowUpdate,
     /// 初回起動のオンボーディングで「はじめる」が押された。
     OnboardingDone,
@@ -240,8 +240,8 @@ pub(crate) fn run(mut app: App) -> ! {
             }
             Event::UserEvent(UiEvent::ShowUpdate) => {
                 // 通知やトレイメニューから開いた場合は、更新カードのある
-                // サウンドタブへ直接移動する。
-                show_window(&window, &webview, Some("sound"));
+                // 一般タブへ直接移動する。
+                show_window(&window, &webview, Some("general"));
                 push_state(&webview, &app, &settings, &notice);
                 push_level(&webview, &app);
             }

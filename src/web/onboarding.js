@@ -25,7 +25,9 @@
     document.addEventListener("keydown", function (event) {
       if (event.key === "Enter" && !event.repeat) finish();
     });
-    button.focus();
+    // Enter で開始できるようにフォーカスするが、preventScroll を付けないと
+    // 下端のボタンまでページがスクロールし、ヘッダーのロゴが画面外へ出る。
+    button.focus({ preventScroll: true });
   }
 
   if (document.readyState === "loading") {

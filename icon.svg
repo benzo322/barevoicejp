@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <clipPath id="sq"><path d="M512 0C132 0 0 132 0 512s132 512 512 512 512-132 512-512S892 0 512 0Z"/></clipPath>
+    <clipPath id="cap">
+      <rect x="426" y="196" width="172" height="380" rx="86"/>
+    </clipPath>
+  </defs>
+
+  <path d="M512 0C132 0 0 132 0 512s132 512 512 512 512-132 512-512S892 0 512 0Z" fill="#0A1322"/>
+  <g clip-path="url(#sq)">
+    <!-- 面 2: 光の当たる円。ベタ塗り 1 枚より奥行きが出る。 -->
+    <circle cx="512" cy="474" r="374" fill="#16273F"/>
+    <circle cx="512" cy="474" r="374" fill="none" stroke="#38BDF8"
+            stroke-width="3" opacity=".18"/>
+  </g>
+
+  <!-- 面 3: マイク。グリルが波形になっている。 -->
+  <rect x="426" y="196" width="172" height="380"
+        rx="86" fill="#FFFFFF"/>
+  <g clip-path="url(#cap)"><rect x="452" y="326.0" width="14" height="120" rx="7" fill="#38BDF8"/><rect x="478" y="292.0" width="14" height="188" rx="7" fill="#38BDF8"/><rect x="504" y="268.0" width="14" height="236" rx="7" fill="#38BDF8"/><rect x="530" y="292.0" width="14" height="188" rx="7" fill="#38BDF8"/><rect x="556" y="326.0" width="14" height="120" rx="7" fill="#38BDF8"/></g>
+  <path d="M330 470a182 182 0 0 0 364 0" fill="none" stroke="#FFFFFF"
+        stroke-width="44" stroke-linecap="round"/>
+  <path d="M512 654v66" stroke="#FFFFFF" stroke-width="44" stroke-linecap="round"/>
+  <path d="M400 724h224" stroke="#38BDF8" stroke-width="48" stroke-linecap="round"/>
+</svg>
